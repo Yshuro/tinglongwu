@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import importlib.metadata as md
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -61,6 +62,14 @@ CUDA_WHEELS = {"cublas": ["cublas64_12.dll", "cublasLt64_12.dll"],  # nvblas64_1
                "cudnn": None}  # None = all DLLs
 # ggml-cuda.dll imports cudart + cuBLAS (cuBLAS imports cuBLASLt); missing -> "Could not find module llama.dll" (#398)
 LLAMA_CUDA_NEEDS = ("cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll")
+# Standalone GPU pack (#763, part 2 of #740): built from the CUDA wheels without Nuitka.
+GPU_PACK_ASSET = "tinglongwu-gpu-pack.zip"
+GPU_PACK_LLAMA_DLL = "ggml-cuda.dll"  # from the pack-venv's llama_cpp/lib (CUDA build of llama-cpp-python)
+GPU_PACK_NVRTC = "nvrtc64_120_0.dll+nvrtc-builtins64_129.dll"  # the nvrtc version CUDA_WHEELS ships (not pinned in requirements)
+GPU_PACK_KEY_FILES = ("requirements-gpu.txt", "requirements-llama-cuda.txt")  # their sha256 + GPU_PACK_NVRTC = wheels_key
+# nvidia-*-cu12 wheels whose licenses/ ship with any package that redistributes their DLLs (full zip, GPU pack)
+NVIDIA_LICENSE_WHEELS = ("cublas", "cudnn", "cuda_runtime", "cuda_nvrtc")
+GPU_PACK_LICENSE_DIR = "licenses"  # zip folder for license texts; DLLs stay at the root (gpu_pack.pack_dir)
 # Microsoft VC++ 2015-2022 runtime, absent on a clean Windows: ctranslate2 / llama.cpp import msvcp140, onnxruntime
 # msvcp140_1, ggml vcomp140 (OpenMP). Copied as one matched set from the installed redistributable (System32) next
 # to tlwu.exe, replacing the older vcruntime140 Nuitka took from Python: msvcp140 must not be newer than vcruntime140.
@@ -259,8 +268,34 @@ def copy_cuda(app: Path, src: Path) -> list[str]:
     return notes
 
 
+def copy_nvidia_licenses(cuda_src: Path, dst: Path) -> list[Path]:
+    """Copy each NVIDIA_LICENSE_WHEELS wheel's licenses/* into dst as NVIDIA-<wheel>-<file>; returns the copies."""
+    dst.mkdir(parents=True, exist_ok=True)
+    out = []
+    for name in NVIDIA_LICENSE_WHEELS:
+        for f in sorted(cuda_src.glob(f"nvidia_{name}_cu12-*/licenses/*")):
+            if f.is_file():
+                out.append(Path(shutil.copy2(f, dst / f"NVIDIA-{name}-{f.name}")))
+    return out
+
+
+def llama_license_file() -> Path | None:
+    """llama-cpp-python's LICENSE (MIT, covers the llama.cpp DLLs in the pack) from its installed dist-info."""
+    try:
+        dist = md.distribution("llama_cpp_python")
+    except md.PackageNotFoundError:
+        return None
+    for f in dist.files or ():
+        if f.name.upper().startswith("LICENSE"):
+            p = Path(dist.locate_file(f))
+            if p.is_file():
+                return p
+    return None
+
+
 def make_gpu_pack(app: Path, out: Path, url: str) -> Path:
-    """Zip app/cuda_libs/ as the separate GPU pack (#613) and write <out>.manifest.json (name, size, sha256, url)."""
+    """Zip app/cuda_libs/ as the separate GPU pack (#613) and write <out>.manifest.json (name, size, sha256, url).
+    app/licenses/* (if any) go under GPU_PACK_LICENSE_DIR/; the DLLs stay at the zip root."""
     if str(REPO) not in sys.path:
         sys.path.insert(0, str(REPO))
     from tinglongwu import gpu_pack
@@ -272,8 +307,88 @@ def make_gpu_pack(app: Path, out: Path, url: str) -> Path:
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for f in files:
             z.write(f, f.name)
+        lic = app / GPU_PACK_LICENSE_DIR
+        for f in sorted(lic.glob("*")) if lic.is_dir() else ():
+            if f.is_file():
+                z.write(f, f"{GPU_PACK_LICENSE_DIR}/{f.name}")
     man_path = out.with_name(out.name + ".manifest.json")
     gpu_pack.write_manifest(gpu_pack.make_manifest(out, url), man_path)
+    return man_path
+
+
+def gpu_pack_wheels_key(repo: Path | None = None) -> str:
+    """sha256 over GPU_PACK_KEY_FILES and the nvrtc version: equal key = the pack can be reused (#763)."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for n in GPU_PACK_KEY_FILES:
+        h.update(n.encode() + b"\0" + ((repo or REPO) / n).read_bytes() + b"\0")
+    h.update(GPU_PACK_NVRTC.encode())
+    return h.hexdigest()
+
+
+def llama_wheel_version(llama_lib: Path) -> str:
+    """llama-cpp-python version of the wheel whose llama_cpp/lib is `llama_lib` (read as text: importing llama_cpp would
+    load llama.dll). Exits non-zero when it cannot be read, so a pack never ships without its version (#881)."""
+    for name in ("__init__.py", "version.py"):
+        f = llama_lib.parent / name
+        if f.is_file():
+            m = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', f.read_text("utf-8", "replace"), re.M)
+            if m:
+                return m.group(1)
+    try:
+        return md.version("llama_cpp_python")
+    except md.PackageNotFoundError:
+        raise SystemExit(f"gpu pack: cannot read the llama-cpp-python version next to {llama_lib}") from None
+
+
+def build_gpu_pack_only(out_dir: Path, cuda_src: Path | None = None, llama_lib: Path | None = None,
+                        url: str = "", repo: Path | None = None, llama_license: Path | None = None,
+                        llama_version: str | None = None) -> Path:
+    """DIR/tinglongwu-gpu-pack.zip + .manifest.json from the CUDA wheels; never runs Nuitka, needs no tlwu.exe.
+    The zip = every file copy_cuda() copies + ggml-cuda.dll; a missing DLL exits non-zero naming it."""
+    import tempfile
+
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    from tinglongwu import gpu_pack
+
+    src = cuda_src or find_cuda_src()
+    if src is None:
+        raise SystemExit("gpu pack: no CUDA 12 wheels (requirements-gpu.txt) found; set TLWU_CUDA_SRC=<site-packages>")
+    if llama_lib is None:
+        import importlib.util
+
+        spec = importlib.util.find_spec("llama_cpp")  # not imported: that would load llama.dll
+        llama_lib = Path(spec.origin).parent / "lib" if spec and spec.origin else None
+    ggml = llama_lib / GPU_PACK_LLAMA_DLL if llama_lib else None
+    if ggml is None or not ggml.is_file():
+        raise SystemExit(f"gpu pack: {GPU_PACK_LLAMA_DLL} not found in {llama_lib} (install requirements-llama-cuda.txt)")
+    llama_version = llama_version or llama_wheel_version(llama_lib)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        stage = Path(tmp)
+        copy_cuda(stage, src)  # exits non-zero naming a missing LLAMA_CUDA_NEEDS dll
+        # #865: the core zip's llama.dll / ggml.dll are the CPU build and never load ggml-cuda.dll, so the pack
+        # ships the whole CUDA build of llama_cpp/lib; device.use_pack_llama_build() points llama_cpp at it.
+        for f in sorted(llama_lib.glob("*.dll")):
+            shutil.copy2(f, stage / "cuda_libs" / f.name)
+        # #764 review A1: the pack redistributes NVIDIA and llama.cpp binaries, so their license texts ship with it
+        lic = stage / GPU_PACK_LICENSE_DIR
+        if not copy_nvidia_licenses(src, lic):
+            raise SystemExit(f"gpu pack: no NVIDIA license files (nvidia_*_cu12-*/licenses/*) found in {src}")
+        llama_lic = llama_license or llama_license_file()
+        if llama_lic is None or not Path(llama_lic).is_file():
+            raise SystemExit("gpu pack: llama-cpp-python LICENSE not found (install requirements-llama-cuda.txt)")
+        shutil.copy2(llama_lic, lic / f"LICENSE-llama.cpp-{Path(llama_lic).name}")
+        (lic / "THIRD_PARTY_NOTICES.txt").write_text(NVIDIA_NOTE, "utf-8")
+        # #881: device.pack_llama_dir() uses the pack's llama build only when this equals llamacheck.LLAMA_VERSION
+        (stage / "cuda_libs" / "llama_version.txt").write_text(llama_version + "\n", encoding="utf-8")
+        zpath = out_dir / GPU_PACK_ASSET
+        man_path = make_gpu_pack(stage, zpath, url)
+    man = gpu_pack.load_manifest(man_path)
+    man["wheels_key"] = gpu_pack_wheels_key(repo)
+    gpu_pack.write_manifest(man, man_path)
     return man_path
 
 
@@ -348,9 +463,8 @@ def write_licenses(app: Path, cuda_src: Path | None) -> None:
         if n and n.lower() not in ("nuitka", "ordered-set", "zstandard", "pip", "setuptools", "wheel"):
             lic_text = DATA_LICENSES.get(n.lower()) or d.metadata.get('License-Expression') or d.metadata.get('License')
             rows.append(f"{n} {d.version}: {lic_text or 'see package'}")
-    for name in ("cublas", "cudnn", "cuda_runtime", "cuda_nvrtc") if cuda_src else ():
-        for f in cuda_src.glob(f"nvidia_{name}_cu12-*/licenses/*"):
-            shutil.copy2(f, lic / f"NVIDIA-{name}-{f.name}")
+    if cuda_src:
+        copy_nvidia_licenses(cuda_src, lic)
     import importlib.util
 
     spec = importlib.util.find_spec("soundfile")
@@ -395,7 +509,16 @@ def main() -> int:
                     help="no CUDA wheels found: build a CPU-only package instead of stopping; on a machine "
                          "without an NVIDIA driver (CI runner) the smoke may also use the CPU llama fallback")
     ap.add_argument("--no-smoke", action="store_true", help="skip the `tlwu.exe --smoke` check before zipping")
+    ap.add_argument("--gpu-pack-only", action="store_true",
+                    help="only build the GPU pack (zip + manifest) from the CUDA wheels, no Nuitka (#763)")
+    ap.add_argument("--out", help="with --gpu-pack-only: output folder")
+    ap.add_argument("--url", default="", help="with --gpu-pack-only: download url written to the manifest")
     a = ap.parse_args()
+    if a.gpu_pack_only:
+        if not a.out:
+            raise SystemExit("--gpu-pack-only needs --out DIR")
+        print("manifest:", build_gpu_pack_only(Path(a.out), url=a.url))
+        return 0
     DIST.mkdir(parents=True, exist_ok=True)
     if not a.post_only:
         src = run_nuitka()

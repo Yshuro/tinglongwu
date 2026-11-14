@@ -4,6 +4,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import stats_dashboard as sd  # noqa: E402
 
@@ -347,3 +349,81 @@ def test_downloads_unavailable_with_history_stays_empty():
     hist = [{"ts": "2026-11-11T10:00:00Z", "downloads": 20}]
     series = sd.build_series(api, "o/r", "dev", NOW, hist)
     assert series["downloads"]["series"] == [None, None, None]
+
+
+# -- #806 active installs from the anonymous update-check counter ------------------------------------------------
+INSTALL_ROWS = [{"date": "2026-11-11", "version": "0.3.3", "os": "windows", "n": 40},
+                {"date": "2026-11-11", "version": "0.3.4", "os": "windows", "n": 12},
+                {"date": "2026-11-10", "version": "0.3.3", "os": "windows", "n": 30},
+                {"date": "2026-11-12", "version": "0.3.4", "os": "windows", "n": 99},  # today: incomplete, left out
+                {"date": "2026-01-01", "version": "0.1.0", "os": "linux", "n": 5}]  # too old
+
+
+def test_active_installs_per_day_and_week_per_version():
+    inst = sd.active_installs(INSTALL_ROWS, NOW)
+    assert inst["days"][-1] == "2026-11-11" and len(inst["days"]) == sd.INSTALL_DAYS
+    assert inst["total"][-2:] == [30, 52]
+    assert inst["versions"] == [{"version": "0.3.3", "os": "windows", "last_day": 40, "week_avg": 10.0},
+                                {"version": "0.3.4", "os": "windows", "last_day": 12, "week_avg": 1.7}]
+    assert sd.active_installs(None, NOW) is None
+
+
+def test_run_renders_active_installs(tmp_path):
+    sd.run(str(tmp_path), "o/r", "dev", api=fake_api, now=NOW, installs=INSTALL_ROWS)
+    page = (tmp_path / "index.html").read_text(encoding="utf-8")
+    assert "<h2>Active installs</h2>" in page and "<td>0.3.3</td><td>windows</td><td>40</td><td>10.0</td>" in page
+    assert json.loads((tmp_path / "series.json").read_text())["installs"]["total"][-1] == 52
+    sd.run(str(tmp_path), "o/r", "dev", api=fake_api, now=NOW, installs=None)
+    assert "Install counter not available yet" in (tmp_path / "index.html").read_text(encoding="utf-8")
+
+
+def test_counter_base_env_and_no_fetch_without_https():
+    assert sd.counter_base({"TLWU_UPDATE_COUNTER": "https://w.example/"}) == "https://w.example"
+    assert sd.fetch_installs("") is None and sd.fetch_installs("http://plain") is None
+
+
+@pytest.mark.parametrize("bad", [{"error": "unavailable"}, ["x"], [{"date": "2026-11-11", "version": "0.3.3", "os": "windows", "n": "lots"}],
+                                 [{"date": [], "version": "0.3.3", "os": "windows", "n": 1}],
+                                 [{"date": {}, "version": "0.3.3", "os": "windows", "n": 1}],
+                                 [{"date": "2026-11-11", "version": "0.3.3", "os": "windows", "n": [1]}]])
+def test_run_survives_bad_counter_answer(tmp_path, bad):
+    sd.run(str(tmp_path), "o/r", "dev", api=fake_api, now=NOW, installs=bad)
+    assert "Install counter not available yet" in (tmp_path / "index.html").read_text(encoding="utf-8")
+
+
+def test_infer_dims_path_rules_662():
+    f = sd.infer_dims
+    assert f(["mobile/lib/main.dart"]) == {"os": "mobile"}
+    assert f(["installer/x.iss"])["os"] == "windows" and f(["tinglongwu/capture/wasapi_loop.py"])["os"] == "windows"
+    assert f(["scripts/mac_install.sh"])["os"] == "mac" and f(["tinglongwu/capture/macos_tap.py"])["os"] == "mac"
+    assert f(["install.sh"])["os"] == "linux" and f(["tinglongwu/capture/pulse.py"])["os"] == "linux"
+    assert f(["tinglongwu/tts.py"])["mode"] == "speak" and f(["tinglongwu/reverse/x.py"])["mode"] == "speak"
+    assert f(["tinglongwu/asr.py"])["mode"] == "listen" and f(["tinglongwu/segment.py"])["mode"] == "listen"
+    assert f(["eval/flores_ja.tsv"])["lang"] == "ja"
+    assert f(["README.md"]) == {}
+
+
+def test_build_flow_uses_inference_only_when_label_missing_662():
+    items = [{"model": "sonnet", "minutes": 10, "labels": [], "files": ["tinglongwu/tts.py", "installer/a.iss"]},
+             {"model": "sonnet", "minutes": 10, "labels": ["mode:listen", "os:linux"], "files": ["tinglongwu/tts.py"]}]
+    flow = sd.build_flow(items)
+    assert {tuple(p[:3]) for p in flow["paths"]} == {("speak", "windows", "all"), ("listen", "linux", "all")}
+    assert flow["inferred"]["mode"] == 50.0 and flow["inferred"]["os"] == 50.0 and flow["unclassified"] == 0.0
+
+
+def test_shared_mode_is_infrastructure_split_by_area_662():
+    items = [{"model": "sonnet", "minutes": 10, "labels": ["maint", "mode:shared", "area:ci"]},
+             {"model": "sonnet", "minutes": 5, "labels": ["maint", "mode:shared", "area:install"]},
+             {"model": "sonnet", "minutes": 5, "labels": ["maint", "mode:shared"]},
+             {"model": "sonnet", "minutes": 20, "labels": ["bug", "mode:speak", "area:tts"]}]
+    flow = sd.build_flow(items)
+    modes = {n["name"]: n["quota"] for n in flow["modes"]}
+    assert modes == {"infrastructure ci": 10.0, "infrastructure install": 5.0, "infrastructure": 5.0, "speak": 20.0}
+    assert "shared" not in modes and flow["unclassified"] == 0.0
+    svg = sd.render_sankey(flow, focus=["shared"])
+    assert "infrastructure ci 25%" in svg
+    # focus "shared" still colours the renamed nodes; focus "speak" alone does not colour them
+    assert svg.count(sd.FOCUS_ORANGE) >= 3
+    only_speak = sd.render_sankey(flow, focus=["speak"])
+    assert sd.focus_match("infrastructure ci", {"shared"}) and not sd.focus_match("infrastructure ci", {"speak"})
+    assert only_speak.count(sd.FOCUS_ORANGE) < svg.count(sd.FOCUS_ORANGE)

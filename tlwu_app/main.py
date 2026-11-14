@@ -4,12 +4,16 @@
   tlwu.exe --cpu                same, forcing the CPU path
   tlwu.exe --setup              open the model setup screen again
   tlwu.exe --smoke              clean-machine check: load every native library, no models, exit 1 on failure
+  tlwu.exe --run-selfupdate <a>  auto-update child (network; tinglongwu_setup.selfupdate, never tinglongwu) #768
   tlwu.exe setup <args>        tlwu-setup on the command line (network; e.g. setup --whisper small --langs ru --to zh)
   tlwu.exe <any tlwu flag>      the normal command line (e.g. --file x.mp3 --to zh, --mic, --gui)
 """
 from __future__ import annotations
 
+import importlib.util
 import os
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -51,14 +55,55 @@ def split_cpu(argv: list[str]) -> tuple[list[str], bool]:
     return [a for a in argv if a != "--cpu"], "--cpu" in argv
 
 
+VERSION_RE = re.compile(r'^__version__\s*=\s*["\']([^"\']+)["\']', re.M)
+VERSION_CHILD_TIMEOUT_S = 60
+
+
+def app_version(run=subprocess.run) -> str | None:
+    """tinglongwu.__version__ without importing tinglongwu in this process (its offline guard would block the setup
+    download, #801). Source: read tinglongwu/__init__.py. Bundled (no .py sources): ask `tlwu.exe --version` in a
+    child, which prints "tinglongwu X.Y.Z; ...". None when neither works."""
+    spec = importlib.util.find_spec("tinglongwu")
+    f = Path(spec.origin) if spec is not None and spec.origin else None
+    if f is not None and f.suffix == ".py" and f.is_file():
+        m = VERSION_RE.search(f.read_text("utf-8", "replace"))
+        if m:
+            return m.group(1)
+    if not is_bundled():
+        return None
+    try:
+        r = run([sys.executable, "--version"], capture_output=True, text=True, timeout=VERSION_CHILD_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"\btinglongwu (\d+\.\d+\.\d+)\b", (r.stdout or "") + (r.stderr or ""))
+    return m.group(1) if m else None
+
+
 def run_setup_worker(args: list[str]) -> int:
     """Networked child process: only tinglongwu_setup is imported here, never tinglongwu."""
     for s in (sys.stdout, sys.stderr):
         if hasattr(s, "reconfigure"):
             s.reconfigure(encoding="utf-8", errors="replace")
+    # #801 --vulkan-pack and #771 `tlwu.exe setup --default-listen`: tinglongwu_setup.cli knows them, downloader.main does not
+    if "--vulkan-pack" in args or "--default-listen" in args:
+        from tinglongwu_setup import cli
+
+        if "--vulkan-pack" in args and "--app-version" not in args:  # #801: the pack must match this app's version
+            v = app_version()
+            if v:
+                args = [*args, "--app-version", v]
+
+        return cli.main(args)
     from tinglongwu_setup import downloader
 
     return downloader.main(args)
+
+
+def run_selfupdate_worker(args: list[str]) -> int:
+    """Networked auto-update child (#768): only tinglongwu_setup is imported here, never tinglongwu."""
+    from tinglongwu_setup import selfupdate
+
+    return selfupdate.main(args)
 
 
 def fix_gui_settings(mdir: Path, cpu_tier: bool) -> None:
@@ -97,6 +142,8 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["--run-setup"]:
         return run_setup_worker(argv[1:])
+    if argv[:1] == ["--run-selfupdate"]:
+        return run_selfupdate_worker(argv[1:])
     if argv[:1] == ["--smoke"]:  # clean-machine check: import every native module, no models (#9)
         from .smoke import check
 
