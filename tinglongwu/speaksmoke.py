@@ -30,16 +30,7 @@ MIN_RMS_DBFS = -35.0  # FAIL below this RMS over the speech frames; same as scri
 RECORD = "CABLE Output"  # the meeting app's microphone when tlwu speaks into "CABLE Input" (#710)
 CLIP_MIC = "speak-smoke clip"  # name the voice's capture check sees for the clip microphone
 ZH_SENTENCES = ("今天天氣很好，我們去公園散步吧。", "請問會議幾點開始？", "這個問題我們明天再討論。")  # = scripts/ci_e2e.py
-ZH_CODE = (  # runs with the Kokoro venv's python: argv = model dir, out wav, sentences... (= scripts/ci_e2e.py)
-    "import sys, numpy as np, soundfile as sf\n"
-    "from kokoro_onnx import Kokoro\n"
-    "d = sys.argv[1]\n"
-    "k = Kokoro(d + '/kokoro-v1.0.int8.onnx', d + '/voices-v1.0.bin')\n"
-    "parts = []\n"
-    "for t in sys.argv[3:]:\n"
-    "    a, sr = k.create(t, voice='zf_xiaobei', speed=1.0, lang='cmn')\n"
-    "    parts += [a, np.zeros(int(sr * 1.2), a.dtype)]\n"
-    "sf.write(sys.argv[2], np.concatenate(parts), sr)\n")
+ZH_SPEAKER = 4  # zf_xiaobei (tts_worker KOKORO_ZH_VOICES[4]), the voice scripts/ci_e2e.py makes its zh clip with
 VOICE_KEYS = ("voice_not_installed", "voice_same_device", "voice_device_missing", "voice_lang_unsupported")
 
 
@@ -99,12 +90,21 @@ def verdict(r: dict, mine: str, other: str) -> list[str]:
     return why
 
 
-def make_clip(py: str, model: str, out: Path) -> Path:
-    import subprocess
+def make_clip(py: str, model: str) -> tuple[np.ndarray, int]:
+    """zh test speech from the installed Kokoro voice, through the app's own TTS worker (no wav in the repo)."""
+    from .reverse.tts_client import TTSClient
 
-    subprocess.run([py, "-c", ZH_CODE, model, str(out), *ZH_SENTENCES], check=True,
-                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    return out
+    tts, parts, sr = TTSClient(py, model, "kokoro", ZH_SPEAKER, "zh"), [], 24000
+    try:
+        for text in ZH_SENTENCES:
+            for h, data in tts.speak(text):
+                if h["t"] == "chunk" and data:
+                    sr = int(h.get("sr", sr))
+                    parts.append(np.frombuffer(data, dtype=np.float32))
+            parts.append(np.zeros(int(sr * 1.2), np.float32))
+    finally:
+        tts.close()
+    return np.concatenate(parts).reshape(-1, 1), sr
 
 
 class Recorder(threading.Thread):
@@ -155,8 +155,7 @@ def run(a) -> dict:
     import soundfile as sf
 
     try:
-        clip_path = Path(a.clip) if a.clip else make_clip(py, model, Path(a.workdir) / "speak_smoke_zh.wav")
-        data, sr = sf.read(str(clip_path), dtype="float32", always_2d=True)
+        data, sr = sf.read(a.clip, dtype="float32", always_2d=True) if a.clip else make_clip(py, model)
     except Exception as e:  # noqa: BLE001 - no Kokoro to make the clip = the voice is not installed either
         return {**r, "error": f"no zh clip: {type(e).__name__}: {e}"}
     clip = to_mono_16k(data, sr)
@@ -221,7 +220,6 @@ def main(argv=None) -> int:
     ap.add_argument("--other", default="en", help="Other side language (default en)")
     ap.add_argument("--install-voice", action="store_true", help="answer yes to the voice install offer")
     ap.add_argument("--clip", default=None, help="zh speech wav (default: made with the installed Kokoro voice)")
-    ap.add_argument("--workdir", default=".", help="where the default clip is written")
     ap.add_argument("--timeout", type=float, default=900.0, help="max seconds until the microphone opens")
     ap.add_argument("--json", default=None)
     a = ap.parse_args(argv)
