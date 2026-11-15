@@ -33,9 +33,10 @@ DEFAULTS = {
     "tour_seen": False,  # #314: the first-launch "3 steps" overlay was closed with "Got it"
     "usage_asked": False,  # #680: the one-time "what do you mainly use it for?" question was answered or skipped
     "usage_use": "",  # #680: the answer (one of USAGE_CHOICES, "" = none); local only, never sent anywhere
-    "send_mode": "confirm",  # #834: how a speak line is sent (confirm / countdown / auto); owner default: confirm
+    "send_mode": "auto",  # #834/#1052: how a speak line is sent (auto = straight away, confirm = show me first); owner default: auto
 }
-SEND_MODES = ("confirm", "countdown", "auto")  # same choices as reverse.sendmode.MODES
+SEND_MODES = ("confirm", "countdown", "auto")  # same choices as reverse.sendmode.MODES (the CLI keeps all three)
+GUI_SEND_MODES = ("auto", "confirm")  # #1052: what Settings offers; the 2 s countdown was too short to cancel
 
 
 def send_gate_line(view) -> str:
@@ -92,29 +93,58 @@ def target_for_locale(tag: str | None) -> str:
 
 
 QUICK_MODES = ("listen", "speak")  # #294 first-screen buttons: "Listen to others" / "I speak"
+SESSION_MODES = ("listen", "speak", "two-way")  # #981: two-way = both legs (meeting / face-to-face)
+
+
+class SameLanguageError(ValueError):
+    """#981: My language and Other side language are the same language: nothing to translate, no session starts.
+    `key` is the i18n key of the one-line message the GUI shows instead of starting."""
+
+    key = "gui_same_lang"
+
+
+def lang_base(code: str | None) -> str:
+    """Language without the script variant: zh-tw / zh-cn -> zh; anything else unchanged ("" for None)."""
+    return "zh" if code in ("zh", "zh-tw", "zh-cn") else (code or "")
+
+
+def session_route(mode: str, mine: str | None, other: str | None) -> list[dict]:
+    """#981: the only place that turns (mode, My language, Other side language) into what a session runs.
+    Returns one leg per direction, each {"leg", "lang" (source), "target", "source" (capture)}:
+    listen = other -> mine, captured from the PC sound (loopback); speak = mine -> other, captured from the
+    microphone (the system default one), whatever capture source was saved; two-way = both legs.
+    mine = a TARGETS value ("zh" = zh-tw; anything else = the default); other = a SOURCE_LANGS value ("auto" when
+    unknown). other == "auto": listen detects the speaker, speak keeps the #294 fallback (English for a Chinese
+    speaker, Traditional Chinese otherwise). Raises SameLanguageError when both are the same language (zh-tw vs zh
+    counts as the same), so a leg never has source == target."""
+    if mode not in SESSION_MODES:
+        raise ValueError(f"unknown session mode: {mode!r}")
+    mine = "zh-tw" if mine == "zh" else (mine if mine in TARGETS else DEFAULTS["target"])
+    other = other if other in SOURCE_LANGS else "auto"
+    if other != "auto" and lang_base(other) == lang_base(mine):
+        raise SameLanguageError(f"My language and Other side language are both {lang_base(mine)!r}")
+    legs = []
+    if mode in ("listen", "two-way"):
+        legs.append({"leg": "listen", "lang": other, "target": mine, "source": "system"})
+    if mode in ("speak", "two-way"):
+        if other == "auto":
+            to = "en" if lang_base(mine) == "zh" else "zh-tw"
+        else:
+            to = "zh-tw" if other == "zh" else other
+        legs.append({"leg": "speak", "lang": lang_base(mine), "target": to, "source": "mic"})
+    return legs
 
 
 def quick_settings(s: dict, mode: str) -> dict:
     """#294 easy start: session settings for a first-screen button; `s` (the saved settings) is not changed.
-    My language = `target` (remembered, under Advanced). #737: the first screen's one picker is the OTHER side's
-    language = `lang` (auto by default). listen = PC sound (loopback) in the other language -> my language.
-    speak = microphone in my language -> the other language; when the other side is auto (or my own language), the
-    #294 fallback: English for a Chinese speaker, Traditional Chinese for an English speaker. Engine/model stay on
-    `quality`."""
+    My language = `target`; the other side's language = `lang` (#737, auto by default). Source, target and capture
+    come only from session_route() (#981): listen = PC sound, other -> mine; speak = microphone, mine -> other.
+    Raises SameLanguageError when both languages are the same. Engine/model stay on `quality`."""
     if mode not in QUICK_MODES:
         raise ValueError(f"unknown quick mode: {mode!r}")
+    (leg,) = session_route(mode, s.get("target"), s.get("lang"))
     out = dict(s)
-    mine = s.get("target") if s.get("target") in TARGETS else DEFAULTS["target"]
-    if mode == "listen":
-        out.update(source="system", target=mine)
-    else:
-        mine_lang = "zh" if mine.startswith("zh") else "en"
-        other = s.get("lang")
-        if other in SOURCE_LANGS and other not in ("auto", mine_lang):
-            target = "zh-tw" if other == "zh" else other
-        else:
-            target = "en" if mine_lang == "zh" else "zh-tw"
-        out.update(source="mic", lang=mine_lang, target=target)
+    out.update({k: v for k, v in leg.items() if k != "leg"})
     return out
 
 
@@ -173,6 +203,30 @@ def quick_buttons(phase: str, active: str | None = None) -> dict[str, tuple[str,
     if phase == "running":
         return {m: ("gui_stop", True) if m == active else (f"gui_quick_{m}", False) for m in QUICK_MODES}
     return {m: (f"gui_quick_{m}", phase == "idle") for m in QUICK_MODES}
+
+
+BOTH_MODE = "both"  # #1001: the one first-screen Start: listen (PC sound -> mine) and speak (mic -> other) together
+SPEAK_MARK = "🎤 "  # #1001: a line of the speak leg in the shared subtitle list starts with this (my words)
+
+
+def both_settings(s: dict) -> tuple[dict, dict]:
+    """#1001: (listen run, speak run) for one Start; `s` is not changed. Same legs as session_route("two-way").
+    The speak leg shows finished lines only (no live draft, no "heard" placeholder: the listen leg owns the draft
+    row, two drafts would overwrite each other) and never saves (both legs would write the same file).
+    Raises SameLanguageError when both languages are the same."""
+    session_route("two-way", s.get("target"), s.get("lang"))  # raises before any run is built
+    listen, speak = quick_settings(s, "listen"), quick_settings(s, "speak")
+    speak.update(live_draft=False, save=False)
+    return listen, speak
+
+
+def start_button(phase: str, active: str | None = None) -> tuple[str, bool]:
+    """#1001: (i18n key, enabled) of the one first-screen Start, same phases as quick_buttons()."""
+    if phase == "loading":
+        return "gui_loading", False
+    if phase == "running":
+        return ("gui_stop", True) if active == BOTH_MODE else ("gui_quick_both", False)
+    return "gui_quick_both", phase == "idle"
 
 
 # #314 first-launch overlay: 3 numbered steps over the real controls. zh-CN has its own text here although the
@@ -324,6 +378,8 @@ def load_settings(path=None, gpu=_gpu_usable) -> dict:
     out["log_font_size"] = clamp_font(out["log_font_size"], DEFAULTS["log_font_size"])
     out["overlay_lines"] = clamp_rows(out["overlay_lines"])
     out["overlay_alpha"] = clamp_alpha(out["overlay_alpha"])
+    if out["send_mode"] == "countdown":  # #1052: removed from the GUI; it behaved like sending straight away
+        out["send_mode"] = "auto"
     if out["send_mode"] not in SEND_MODES:
         out["send_mode"] = DEFAULTS["send_mode"]
     return out
@@ -565,7 +621,9 @@ def download_cmd(model: str, mdir=None, bundled: bool | None = None) -> list[str
     from ..models import models_dir
 
     if bundled is None:
-        bundled = bool(getattr(sys, "frozen", False)) or os.environ.get("TLWU_BUNDLED") == "1"
+        from .autoupdate import is_bundled  # #1007: also tlwu.exe as sys.executable (launcher env not in os.environ)
+
+        bundled = is_bundled()
     base = [os.path.abspath(sys.argv[0]), "--run-setup"] if bundled else [sys.executable, "-m", "tinglongwu_setup"]
     return [*base, "--whisper", model, "--models-dir", str(models_dir(str(mdir) if mdir else None))]
 
@@ -795,6 +853,18 @@ class QueueSink(Sink):
         self.q.put(("final", r.original, r.target if r.src != r.tgt and r.target else r.original))
 
 
+class SpeakQueueSink(QueueSink):
+    """#1001: the speak leg of a combined session: finished lines only ("final_side", marked with SPEAK_MARK), so
+    they share the subtitle list with the listen leg without touching its draft / pending rows."""
+
+    def write_source(self, src: str, original: str, speaker: str | None = None) -> None:
+        pass
+
+    def write(self, r: Result) -> None:
+        out = r.target if r.src != r.tgt and r.target else r.original
+        self.q.put(("final_side", SPEAK_MARK + r.original, SPEAK_MARK + out))
+
+
 class QueueDraftRenderer(DraftRenderer):
     """Drop-in for DraftRenderer that publishes draft events instead of writing ANSI to a terminal."""
 
@@ -840,6 +910,9 @@ class SubtitleState:
             if self.pending and self.pending[0] == ev[1]:
                 self.pending.pop(0)
             self.draft = ("", self.pending[-1]) if self.pending else None
+            self.finals.append((ev[1], ev[2]))
+            del self.finals[:-self.max_lines]
+        elif kind == "final_side":  # #1001: a speak-leg line next to a listen session: the draft row stays
             self.finals.append((ev[1], ev[2]))
             del self.finals[:-self.max_lines]
         elif kind == "clear":
@@ -892,3 +965,39 @@ def gui_error_text(e: BaseException) -> str:
     if msg and not _CLI_FLAG.search(msg) and (ui_lang() == "en" or not msg.isascii()):
         return msg
     return t("gui_error_generic")
+
+
+# #1020: the run_session status lines (cli.LoadProgress / announce_ready, English for the CLI) in the UI language
+LOAD_STAGE_KEYS = {"speech model": "gui_stage_speech", "translation engine": "gui_stage_translation",
+                   "speaker model": "gui_stage_speaker", "voice": "gui_stage_voice"}
+_LOADING_RE = re.compile(r"^loading (.+?)\.\.\. \((\d+(?:\.\d+)?) s\)$")
+_LOADED_RE = re.compile(r"^listening(?: - loaded in (\d+(?:\.\d+)?) s(?: \((.*)\))?)?$")
+_PART_RE = re.compile(r"^(.+) (\d+(?:\.\d+)?) s$")
+
+
+def _stage_name(label: str) -> str:
+    from ..i18n import t
+
+    key = LOAD_STAGE_KEYS.get(label)
+    return t(key) if key else label
+
+
+def load_status_text(msg: str) -> str:
+    """#1020: "loading speech model... (0.0 s)" / "listening - loaded in 4.9 s (speech model 3.5 s, ...)" from the
+    session -> the same line in the UI language. Any other text is returned unchanged."""
+    from ..i18n import t
+
+    m = _LOADING_RE.match(msg)
+    if m:
+        return t("gui_st_loading", name=_stage_name(m.group(1)), s=m.group(2))
+    m = _LOADED_RE.match(msg)
+    if not m:
+        return msg
+    if m.group(1) is None:
+        return t("gui_st_listening")
+    parts = []
+    for p in (m.group(2) or "").split(", ") if m.group(2) else []:
+        pm = _PART_RE.match(p)
+        parts.append(t("gui_st_part", name=_stage_name(pm.group(1)), s=pm.group(2)) if pm else p)
+    text = t("gui_st_loaded", s=m.group(1))
+    return text + (t("gui_st_parts", parts=t("gui_st_sep").join(parts)) if parts else "")

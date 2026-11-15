@@ -2,17 +2,28 @@
 import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:record/record.dart';
 
 import '../logic/context_budget.dart';
+import '../logic/phone_audio.dart';
+import '../logic/segmenter.dart';
 import '../logic/subtitle_trim.dart';
 import 'app_log.dart';
 import 'asr_worker.dart';
 import 'model_paths.dart';
+import 'play_packs.dart';
+import 'playback_capture.dart';
 import '../logic/target_language.dart';
 import 'translator.dart';
 
-enum Stage { starting, loadingModels, listening, missingModels, error }
+enum Stage { starting, downloadingModels, loadingModels, listening, missingModels, error }
+
+/// Where the audio comes from: the microphone, or other apps' playback (#998, Android 10+).
+enum AudioSourceKind { mic, phone }
+
+/// Shown instead of an empty overlay when phone audio stays silent (app blocks capture).
+const silenceHintText = '沒有聽到影片的聲音：這個 App 可能不允許翻譯（例如有版權保護的影片），或影片還沒開始播放';
 
 class Subtitle {
   Subtitle(this.ru, {this.zh, this.traditionalOk = true});
@@ -32,11 +43,17 @@ class _Job {
   int asrFinalMs;
 }
 
-/// mic -> sherpa ASR isolate -> queue -> Hy-MT2 translator -> subtitles.
+/// mic or phone audio -> sherpa ASR isolate -> queue -> Hy-MT2 translator -> subtitles.
 class Pipeline extends ChangeNotifier {
   Stage stage = Stage.starting;
   String? errorText;
   List<String> missingFiles = const [];
+
+  /// First-run Play download (Stage.downloadingModels): bytes, total, PlayPacks.kt state name,
+  /// and the error (network, storage, cancelled, Play code) once it stopped.
+  int dlDone = 0, dlTotal = 0;
+  String dlState = 'pending';
+  String? dlError;
   ModelPaths? paths;
 
   String draftRu = '';
@@ -66,6 +83,20 @@ class Pipeline extends ChangeNotifier {
   bool _busy = false;
   bool _disposed = false;
 
+  /// Audio source (#998). [phoneSupported] = this device can capture other apps' audio.
+  AudioSourceKind source = AudioSourceKind.mic;
+  bool phoneSupported = false;
+  bool switchingSource = false;
+
+  /// True while phone audio has been silent for a while (see [silenceHintText]).
+  bool silenceHint = false;
+  OverlayStyle overlayStyle = const OverlayStyle();
+  OverlayStyleStore? _styleStore;
+  final SilenceWatch _silence = SilenceWatch();
+  StreamSubscription<Uint8List>? _phoneSub;
+  AppLifecycleListener? _resumeOnce;
+  String? _overlaySent;
+
   AppLog get _log => AppLog.instance;
 
   /// Subtitle language code (#730): zh = zh-Hant (default), en, ...
@@ -79,6 +110,24 @@ class Pipeline extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<bool> _downloadPacks() async {
+    stage = Stage.downloadingModels;
+    dlError = null;
+    dlState = 'pending';
+    notifyListeners();
+    final r = await PlayPacks.fetch(onState: (d, t, st) {
+      dlDone = d;
+      dlTotal = t;
+      dlState = st;
+      notifyListeners();
+    });
+    if (r.error == null) return true;
+    _log.e('play packs: ${r.error} ${r.message ?? ''}');
+    dlError = r.error;
+    notifyListeners();
+    return false;
+  }
+
   Future<void> start() async {
     try {
       paths = await ModelPaths.resolve();
@@ -87,7 +136,17 @@ class Pipeline extends ChangeNotifier {
       _log.i('files dir ${paths!.filesDir}');
       _targetStore = TargetLanguageStore('${paths!.filesDir}/target_language.txt');
       target = _targetStore!.load();
-      final missing = paths!.missing();
+      _styleStore = OverlayStyleStore('${paths!.filesDir}/overlay_style.txt');
+      overlayStyle = _styleStore!.load();
+      phoneSupported = await PlaybackCapture.supported();
+      var missing = paths!.missing();
+      if (missing.isNotEmpty && await PlayPacks.available()) {
+        // Play install: the fast-follow packs may still be downloading. Wait here with a progress
+        // screen; on failure the screen offers 「重試」 (= start() again).
+        if (!await _downloadPacks()) return;
+        paths = await ModelPaths.resolve();
+        missing = paths!.missing();
+      }
       if (missing.isNotEmpty) {
         missingFiles = missing;
         _log.e('models missing: $missing');
@@ -146,13 +205,7 @@ class Pipeline extends ChangeNotifier {
 
       _drain(); // anything queued while the LLM was loading (debug wavs)
       if (_disposed) return;
-      final stream = await _rec.startStream(const RecordConfig(
-        encoder: AudioEncoder.pcm16bits,
-        sampleRate: 16000,
-        numChannels: 1,
-      ));
-      _micSub = stream.listen(_asr!.feedPcm16,
-          onError: (Object e) => _fail('Mic error: $e'));
+      await _startMic();
       stage = Stage.listening;
       _log.i('listening');
       notifyListeners();
@@ -160,6 +213,131 @@ class Pipeline extends ChangeNotifier {
       _log.e('start failed: $e\n$st');
       _fail('$e');
     }
+  }
+
+  Future<void> _startMic() async {
+    if (_disposed || _micSub != null) return;
+    final stream = await _rec.startStream(const RecordConfig(
+      encoder: AudioEncoder.pcm16bits,
+      sampleRate: 16000,
+      numChannels: 1,
+    ));
+    if (_disposed) return;
+    _micSub = stream.listen(_asr!.feedPcm16, onError: (Object e) => _fail('Mic error: $e'));
+  }
+
+  Future<void> _stopMic() async {
+    final sub = _micSub;
+    _micSub = null;
+    await sub?.cancel();
+    try {
+      await _rec.stop();
+    } catch (_) {}
+  }
+
+  /// Switches the audio source. Phone audio asks the system capture consent (every session, a
+  /// system rule) and shows the floating overlay. Returns a short user message on failure.
+  Future<String?> setSource(AudioSourceKind k) async {
+    if (k == source || switchingSource || _asr == null || _disposed) return null;
+    switchingSource = true;
+    notifyListeners();
+    try {
+      if (k == AudioSourceKind.phone) {
+        if (!phoneSupported) return '這支手機不支援看影片翻譯（需要 Android 10 以上）';
+        final pcm = PlaybackCapture.pcm();
+        _silence.reset();
+        _phoneSub = pcm.listen(_onPhonePcm, onDone: _onPhoneStopped,
+            onError: (Object e) {
+          _log.e('phone audio error: $e');
+          _onPhoneStopped();
+        });
+        final ok = await PlaybackCapture.start();
+        if (!ok || _disposed) {
+          await _phoneSub?.cancel();
+          _phoneSub = null;
+          _log.i('phone audio: consent declined');
+          return ok ? null : '已取消看影片翻譯';
+        }
+        await _stopMic();
+        source = AudioSourceKind.phone;
+        silenceHint = false;
+        _overlaySent = null;
+        await PlaybackCapture.overlayStyle(overlayStyle);
+        await PlaybackCapture.overlayShow();
+        _log.i('source: phone audio');
+      } else {
+        source = AudioSourceKind.mic;
+        await _phoneSub?.cancel();
+        _phoneSub = null;
+        await PlaybackCapture.stop();
+        silenceHint = false;
+        await _startMic();
+        _log.i('source: mic');
+      }
+      return null;
+    } catch (e) {
+      _log.e('setSource($k) failed: $e');
+      return '切換音源失敗：$e';
+    } finally {
+      switchingSource = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  void _onPhonePcm(Uint8List b) {
+    _asr?.feedPcm16(b);
+    final s = _silence.feed(b);
+    if (s != silenceHint) {
+      silenceHint = s;
+      _log.i(s ? 'phone audio: silent' : 'phone audio: sound');
+      notifyListeners();
+    }
+  }
+
+  /// Capture ended outside the app (notification Stop, projection revoked): back to the mic,
+  /// started once the app is in front again (a background mic needs its own service).
+  void _onPhoneStopped() {
+    _phoneSub = null;
+    if (_disposed || source != AudioSourceKind.phone) return;
+    _log.i('phone audio stopped');
+    source = AudioSourceKind.mic;
+    silenceHint = false;
+    PlaybackCapture.overlayHide().catchError((_) {});
+    notifyListeners();
+    if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+      _startMic().catchError((Object e) => _fail('Mic error: $e'));
+    } else {
+      _resumeOnce?.dispose();
+      _resumeOnce = AppLifecycleListener(onResume: () {
+        _resumeOnce?.dispose();
+        _resumeOnce = null;
+        if (source == AudioSourceKind.mic) {
+          _startMic().catchError((Object e) => _fail('Mic error: $e'));
+        }
+      });
+    }
+  }
+
+  /// 中文 / 原文 / 雙語 for the app and the overlay; saved with the overlay style.
+  void setSubtitleMode(SubtitleMode m) => setOverlayStyle(overlayStyle.copyWith(mode: m));
+
+  void setOverlayStyle(OverlayStyle s) {
+    overlayStyle = s.clamp();
+    _styleStore?.save(overlayStyle);
+    PlaybackCapture.overlayStyle(overlayStyle).catchError((_) {});
+    notifyListeners();
+  }
+
+  /// Every UI update also refreshes the floating overlay while phone audio is the source.
+  @override
+  void notifyListeners() {
+    super.notifyListeners();
+    if (source != AudioSourceKind.phone || _disposed) return;
+    final lines = displayLines([for (final s in subtitles) (s.ru, s.zh)], overlayStyle.mode);
+    final key = '${silenceHint ? 1 : 0}|${lines.join('\n')}';
+    if (key == _overlaySent) return;
+    _overlaySent = key;
+    PlaybackCapture.overlayLines(lines, silenceHint ? silenceHintText : null).catchError((_) {});
   }
 
   void _fail(String msg) {
@@ -185,10 +363,15 @@ class Pipeline extends ChangeNotifier {
         : now - f.decodeMs - (AsrConfig.vadMinSilence * 1000).round();
     _log.i('ASR final${f.forced ? " (forced)" : ""} '
         'lang=${f.lang} decode=${f.decodeMs}ms audio=${f.audioMs}ms: ${AppLog.text(f.text)}');
-    final sub = Subtitle(f.text);
-    subtitles.add(sub);
+    // One subtitle (and one LLM call) per sentence: short lines update fast and the model never
+    // sees several sentences to smooth together.
+    final sentences = SentenceSegmenter.split(f.text);
+    for (final text in sentences.isEmpty ? [f.text] : sentences) {
+      final sub = Subtitle(text);
+      subtitles.add(sub);
+      _queue.add(_Job(text, sub, speechEnd, now, f.lang));
+    }
     _trimSubtitles();
-    _queue.add(_Job(f.text, sub, speechEnd, now, f.lang));
     // Bound the backlog: merge the oldest two waiting jobs (keeps all text,
     // costs one fewer LLM call) instead of dropping. A merge that would be
     // longer than ContextBudget.maxMergeChars is skipped (#533): it could
@@ -269,6 +452,11 @@ class Pipeline extends ChangeNotifier {
     _disposed = true;
     _micSub?.cancel();
     _asrSub?.cancel();
+    _resumeOnce?.dispose();
+    if (_phoneSub != null || source == AudioSourceKind.phone) {
+      _phoneSub?.cancel();
+      PlaybackCapture.stop().catchError((_) {});
+    }
     _rec.dispose();
     _asr?.dispose();
     _tr?.dispose();

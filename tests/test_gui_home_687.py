@@ -27,6 +27,11 @@ def home_app(tmp_path, monkeypatch):
         self.q.put(("stopped",))
 
     monkeypatch.setattr(app.App, "_work", fake_work)
+    from tinglongwu import vbcable
+    from tinglongwu.gui import voice_install
+
+    monkeypatch.setattr(vbcable, "needs_offer", lambda names, platform=None: False)  # #1001: no real dialogs
+    monkeypatch.setattr(voice_install, "offer_needed", lambda run, mdir: False)
     # every language pack counts as installed: a missing pack would open the real "Download speech model" askyesno
     monkeypatch.setattr(app.pack_on_demand, "first_missing", lambda *a, **k: None)
     (tmp_path / "tinglongwu").mkdir()
@@ -60,28 +65,33 @@ def _outside_advanced(a):
 
 
 def test_fresh_config_shows_three_controls_and_advanced_is_collapsed(home_app):
+    """Owner 2026-11-15: my language + other side's language + one Start (listen + speak, #1001)."""
     make, _ = home_app
     a = make()
     a.toggle_adjust()
     a.root.update()
     assert a.settings["advanced_open"] is False and not a.frm.winfo_ismapped()
-    controls = _outside_advanced(a)
-    assert sorted(w.winfo_class() for w in controls) == ["TButton", "TButton", "TCombobox"]
-    assert all(w.winfo_ismapped() for w in controls)
+    # #1028: the main window carries my + the other side's language and the one Start (mic / floating toggles beside it)
+    assert a.home_target.winfo_ismapped() and a.home_lang.winfo_ismapped() and a.btn.winfo_ismapped()
+    assert a.btn is a.both_btn and a.btn.winfo_toplevel() is a.root
+    # the settings page is plain language outside Advanced: choices only (radio / check), no dropdowns or entries
+    outside = {w.winfo_class() for w in _outside_advanced(a)}
+    assert not outside & {"TCombobox", "TEntry", "TSpinbox", "Entry", "Text"}, outside
 
 
-@pytest.mark.parametrize("mode,source", [("listen", "system"), ("speak", "mic")])
-def test_each_big_button_starts_with_its_source(home_app, mode, source):
+def test_one_start_runs_the_listen_and_the_speak_source(home_app):
+    """#1001: the one Start = PC sound (listen leg) + microphone (speak leg)."""
     make, runs = home_app
     a = make()
-    a.quick_btns[mode].invoke()
+    assert not hasattr(a, "quick_btns")
+    a.both_btn.invoke()
     a.root.update()
     for _ in range(50):
         if runs:
             break
         a.root.after(20)
         a.root.update()
-    assert runs and runs[0]["source"] == source
+    assert runs and runs[0]["source"] == "system" and a.speak_run["source"] == "mic"
 
 
 def test_advanced_open_state_survives_restart(home_app):
@@ -106,7 +116,7 @@ def test_advanced_open_state_survives_restart(home_app):
     ("zh-tw", "ru", ("ru", "zh-tw"), ("zh", "ru")),
     ("en", "zh", ("zh", "en"), ("en", "zh-tw")),
     ("zh-tw", "auto", ("auto", "zh-tw"), ("zh", "en")),  # other side unknown: the #294 fallback
-    ("zh-cn", "zh", ("zh", "zh-cn"), ("zh", "en")),  # other side = my own language: the #294 fallback
+    ("zh-cn", "en", ("en", "zh-cn"), ("zh", "en")),  # #981: other side = my own language is refused (test_session_route_981)
 ])
 def test_other_side_language_drives_listen_source_and_speak_target(mine, other, listen, speak):
     from tinglongwu.gui import core
@@ -126,24 +136,20 @@ def test_home_picker_is_the_other_side_language_and_tour_step_1(home_app):
     from tinglongwu.langs import label
 
     make, runs = home_app
-    for mode in ("listen", "speak"):
-        # one App per mode: fake_work never reports ready, so the run stays "Loading..." (#332) with the quick
-        # button / Stop disabled; a second click on the same App could neither stop it nor start the other mode
-        a = make()
-        assert str(a.home_lang.cget("textvariable")) == str(a.v_lang) == str(a.tour.lang_box.cget("textvariable"))
-        a.home_lang.set(label("ja"))
-        a.v_target.set("zh-tw")
-        runs.clear()
-        a.quick_btns[mode].invoke()
+    a = make()
+    assert str(a.home_lang.cget("textvariable")) == str(a.v_lang) == str(a.tour.lang_box.cget("textvariable"))
+    a.home_lang.set(label("ja"))
+    a.v_target.set("zh-tw")
+    a.both_btn.invoke()
+    a.root.update()
+    for _ in range(50):
+        if runs:
+            break
+        a.root.after(20)
         a.root.update()
-        for _ in range(50):
-            if runs:
-                break
-            a.root.after(20)
-            a.root.update()
-        assert runs, mode
-        got = (runs[0]["lang"], runs[0]["target"])
-        assert got == (("ja", "zh-tw") if mode == "listen" else ("zh", "ja")), mode
-        a.stop_ev.set()
-        if a.worker is not None:
-            a.worker.join(2)
+    assert runs
+    assert (runs[0]["lang"], runs[0]["target"]) == ("ja", "zh-tw")  # listen: other side -> mine
+    assert (a.speak_run["lang"], a.speak_run["target"]) == ("zh", "ja")  # speak: mine -> other side
+    a.stop_ev.set()
+    if a.worker is not None:
+        a.worker.join(2)

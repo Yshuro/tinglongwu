@@ -129,6 +129,9 @@ def main(argv=None) -> int:
                    help="check that the installed llama-cpp-python build loads and fits this CPU (no network)")
     p.add_argument("--selftest", action="store_true",
                    help="run `tlwu --selftest` (no network); --model/--engine/--device are forwarded")
+    p.add_argument("--gpu-pack", action="store_true",
+                   help="download the release's GPU pack (cuBLAS / cuDNN DLLs for NVIDIA), size+SHA256-checked, into "
+                        "gpu-pack/ next to the app (TLWU_GPU_PACK moves it); a release without it is skipped (#966)")
     p.add_argument("--vulkan-pack", action="store_true",
                    help="download the release's Vulkan llama.cpp pack (AMD / Intel GPUs), SHA256-checked, into "
                         "vulkan-pack/ next to the app (TLWU_VULKAN_PACK moves it); a release without it is skipped (#801)")
@@ -146,7 +149,7 @@ def main(argv=None) -> int:
     p.add_argument("--requirements", default=str(ROOT / "requirements.txt"))
     p.add_argument("--bundle", metavar="OUT.zip")
     p.add_argument("--from-bundle", metavar="BUNDLE.zip")
-    p.add_argument("--models-dir", default=os.environ.get("TLWU_MODELS") or str(ROOT / "models"))
+    p.add_argument("--models-dir", default=str(downloader.default_models_dir()))
     p.add_argument("--list", action="store_true", help="offline: installed / missing language packs")
     p.add_argument("--ask-lang", action="store_true",
                    help="ask which language to understand (default from the OS locale), then install only that pack "
@@ -192,6 +195,10 @@ def main(argv=None) -> int:
         from . import defaults
 
         return defaults.run(mdir)
+    if a.gpu_pack:
+        from . import gpu_pack
+
+        return gpu_pack.run(gpu_pack.default_dest(ROOT), a.app_version or source_version(ROOT))
     if a.vulkan_pack:
         from . import vulkan_pack
 

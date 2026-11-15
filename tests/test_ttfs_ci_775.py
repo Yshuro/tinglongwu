@@ -66,8 +66,10 @@ def test_windows_commands_934():
     assert install.startswith(r'start /wait "" "C:\dl\tinglongwu-setup.exe" /VERYSILENT')
     assert r'/DIR="C:\t\tlwu"' in install and "TLWU_SKIP_MODELS" not in install
     assert setup == r'type "C:\t\tlwu\install.log"'
-    assert tlwu == (r'"C:\t\tlwu\.venv\Scripts\tlwu.exe" --file "C:\t\tlwu\tinglongwu\data\selftest_en.wav" '
-                    r'--device cpu')
+    args = r'--file "C:\t\tlwu\tinglongwu\data\selftest_en.wav" --device cpu'
+    # #1060: the wizard's core layout has {app}\tlwu.exe (no .venv): try it first, the venv exe only as fallback
+    assert tlwu == (r'if exist "C:\t\tlwu\tlwu.exe" ("C:\t\tlwu\tlwu.exe" ' + args + r') else '
+                    r'("C:\t\tlwu\.venv\Scripts\tlwu.exe" ' + args + ')')
 
 
 def test_windows_needs_setup_exe_and_writes_download_mb(tmp_path, monkeypatch):
@@ -112,3 +114,14 @@ def test_windows_main_writes_setup_time_773(tmp_path, monkeypatch):
                    "--out", str(tmp_path / "ttfs.json")]) == 0
     doc = json.loads((tmp_path / "setup_time.json").read_text(encoding="utf-8"))
     assert doc["setup_seconds"] == 50.0 and doc["pip_lines"] == 1 and doc["ready"] is False
+
+
+def test_install_size_in_summary_773(tmp_path):
+    m = _load()
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.bin").write_bytes(b"x" * (1024 * 1024))
+    (tmp_path / "sub" / "b.bin").write_bytes(b"x" * (1024 * 1024))
+    assert m.dir_size_mb(str(tmp_path)) == 2.0
+    assert m.dir_size_mb(str(tmp_path / "missing")) == 0.0
+    assert "install_size_mb: 2.0" in m.summary_text("windows", {}, 2.0)
+    assert "install_size_mb" not in m.summary_text("windows", {})

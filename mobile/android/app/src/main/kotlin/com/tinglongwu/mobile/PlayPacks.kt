@@ -2,19 +2,21 @@ package com.tinglongwu.mobile
 
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.IntentSenderRequest
+import com.google.android.play.core.assetpacks.AssetPackException
 import com.google.android.play.core.assetpacks.AssetPackManager
 import com.google.android.play.core.assetpacks.AssetPackManagerFactory
 import com.google.android.play.core.assetpacks.AssetPackState
 import com.google.android.play.core.assetpacks.AssetPackStateUpdateListener
+import com.google.android.play.core.assetpacks.model.AssetPackErrorCode
 import com.google.android.play.core.assetpacks.model.AssetPackStatus
 import io.flutter.plugin.common.MethodChannel
 
 /**
- * Model download through Google Play Asset Delivery (on-demand packs `models_asr`, `models_llm`).
- * The Play Store downloads the packs, so the app still has no INTERNET permission. Works only when
- * the app was installed from Play; a side-loaded APK gets `available = false` and keeps the manual
- * zip import. Dart copies the files out of the pack folders through the normal checked import
- * (size + SHA-256 against the manifest) and then calls `remove` to free the space.
+ * Models through Google Play Asset Delivery (fast-follow packs `models_asr`, `models_llm`). Play
+ * downloads them right after install, so the app still has no INTERNET permission. The app reads
+ * the model files in place from [locations] (no copy). [fetch] only joins or restarts a download
+ * that is not finished yet. A side-loaded APK has no packs: [locations] is empty, `available` is
+ * false, and the manual zip import stays the way in.
  */
 class PlayPacks(
     activity: android.app.Activity,
@@ -24,6 +26,8 @@ class PlayPacks(
     private var listener: AssetPackStateUpdateListener? = null
     private var pending: MethodChannel.Result? = null
     private var asked = false
+    private var progress: ((Long, Long, String) -> Unit)? = null
+    private var lastReport: ((String) -> Unit)? = null
 
     /** {available, totalBytes, paths: {pack: assetsPath}} ; paths only for packs already on the device. */
     fun status(result: MethodChannel.Result) {
@@ -40,28 +44,35 @@ class PlayPacks(
     }
 
     /**
-     * Downloads every pack not yet on the device. Progress goes to [onProgress] (bytes, total, status).
-     * Completes with {pack: assetsPath} once all packs are COMPLETED.
+     * Joins (or restarts) the Play download of every pack not yet on the device. Progress goes to
+     * [onProgress] (bytes, total, state name, see [stateName]). Completes with {pack: assetsPath}
+     * once all packs are COMPLETED; fails with code FAILED (details = "network", "storage" or the
+     * Play error code) or CANCELLED. Declining Play's mobile-data dialog does not fail: the
+     * download keeps waiting for Wi-Fi and [confirmDialog] can ask again.
      */
-    fun fetch(result: MethodChannel.Result, onProgress: (Long, Long, Int) -> Unit) {
+    fun fetch(result: MethodChannel.Result, onProgress: (Long, Long, String) -> Unit) {
         if (pending != null) { result.error("BUSY", "download already running", null); return }
         if (PACKS.all { apm.getPackLocation(it) != null }) { result.success(paths()); return }
         pending = result
         asked = false
         val states = HashMap<String, AssetPackState>()
+        fun report(state: String) {
+            progress?.invoke(states.values.sumOf { it.bytesDownloaded() },
+                states.values.sumOf { it.totalBytesToDownload() }, state)
+        }
+        progress = { d, t, st -> onProgress(d, t, st) }
+        lastReport = ::report
         val l = AssetPackStateUpdateListener { st ->
             if (st.name() !in PACKS) return@AssetPackStateUpdateListener
             states[st.name()] = st
-            val done = states.values.sumOf { it.bytesDownloaded() }
-            val total = states.values.sumOf { it.totalBytesToDownload() }
-            onProgress(done, total, st.status())
+            report(stateName(st.status()))
             when (st.status()) {
                 AssetPackStatus.REQUIRES_USER_CONFIRMATION, AssetPackStatus.WAITING_FOR_WIFI -> {
                     // Large download on mobile data, or Play wants consent: show Play's own dialog once.
                     if (!asked) { asked = true; apm.showConfirmationDialog(confirm) }
                 }
-                AssetPackStatus.FAILED -> finishError("FAILED", "${st.name()}: Play error ${st.errorCode()}")
-                AssetPackStatus.CANCELED -> finishError("CANCELLED", "cancelled")
+                AssetPackStatus.FAILED -> finishError("FAILED", "${st.name()}: Play error ${st.errorCode()}", reason(st.errorCode()))
+                AssetPackStatus.CANCELED -> finishError("CANCELLED", "cancelled", null)
                 AssetPackStatus.COMPLETED -> {
                     if (PACKS.all { apm.getPackLocation(it) != null }) finishOk()
                 }
@@ -70,23 +81,30 @@ class PlayPacks(
         }
         listener = l
         apm.registerListener(l)
-        apm.fetch(PACKS).addOnFailureListener { e -> finishError("FAILED", e.message ?: e.toString()) }
+        // Seed the total with packs Play already knows (one may be done, the other still running).
+        apm.getPackStates(PACKS).addOnSuccessListener { s ->
+            for ((name, st) in s.packStates()) if (name in PACKS) states.putIfAbsent(name, st)
+            report("pending")
+        }
+        apm.fetch(PACKS).addOnFailureListener { e ->
+            finishError("FAILED", e.message ?: e.toString(), (e as? AssetPackException)?.let { reason(it.errorCode) })
+        }
     }
 
-    /** Result of Play's confirmation dialog (user declined = stop the download). */
+    /** Result of Play's confirmation dialog. Declined = keep waiting for Wi-Fi (Play resumes there). */
     fun onConfirmResult(ok: Boolean) {
-        if (!ok) { apm.cancel(PACKS); finishError("CANCELLED", "download not confirmed") }
+        if (!ok) lastReport?.invoke("waitingWifi")
+    }
+
+    /** "Use mobile data" from the waiting-for-Wi-Fi screen: shows Play's dialog again. */
+    fun confirmDialog() {
+        if (pending != null) apm.showConfirmationDialog(confirm)
     }
 
     fun cancel() { apm.cancel(PACKS) }
 
-    /** Frees the pack storage after the files were copied into the models dir. */
-    fun remove(result: MethodChannel.Result) {
-        var left = PACKS.size
-        for (p in PACKS) {
-            apm.removePack(p).addOnCompleteListener { if (--left == 0) result.success(null) }
-        }
-    }
+    /** {pack: assetsPath} for the packs already on the device (empty for a side-loaded APK). */
+    fun locations(): Map<String, String> = try { paths() } catch (_: Exception) { emptyMap() }
 
     private fun paths(): Map<String, String> =
         PACKS.mapNotNull { p -> apm.getPackLocation(p)?.assetsPath()?.let { p to it } }.toMap()
@@ -96,18 +114,35 @@ class PlayPacks(
         cleanup(); r.success(paths())
     }
 
-    private fun finishError(code: String, msg: String) {
+    private fun finishError(code: String, msg: String, details: String?) {
         val r = pending ?: return
-        cleanup(); r.error(code, msg, null)
+        cleanup(); r.error(code, msg, details)
     }
 
     private fun cleanup() {
         pending = null
         listener?.let { apm.unregisterListener(it) }
         listener = null
+        progress = null
+        lastReport = null
     }
 
     companion object {
         val PACKS = listOf("models_asr", "models_llm")
+
+        /** Play status -> the name the Dart download screen shows. */
+        fun stateName(status: Int): String = when (status) {
+            AssetPackStatus.DOWNLOADING -> "downloading"
+            AssetPackStatus.TRANSFERRING, AssetPackStatus.COMPLETED -> "transferring"
+            AssetPackStatus.WAITING_FOR_WIFI, AssetPackStatus.REQUIRES_USER_CONFIRMATION -> "waitingWifi"
+            AssetPackStatus.FAILED -> "failed"
+            else -> "pending"
+        }
+
+        fun reason(code: Int): String = when (code) {
+            AssetPackErrorCode.NETWORK_ERROR -> "network"
+            AssetPackErrorCode.INSUFFICIENT_STORAGE -> "storage"
+            else -> code.toString()
+        }
     }
 }

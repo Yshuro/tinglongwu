@@ -6,6 +6,7 @@
   tlwu.exe --smoke              clean-machine check: load every native library, no models, exit 1 on failure
   tlwu.exe --run-selfupdate <a>  auto-update child (network; tinglongwu_setup.selfupdate, never tinglongwu) #768
   tlwu.exe setup <args>        tlwu-setup on the command line (network; e.g. setup --whisper small --langs ru --to zh)
+  tlwu.exe speak-smoke <args>  #974 one 我來說 press without the window (tinglongwu/speaksmoke.py; CI)
   tlwu.exe <any tlwu flag>      the normal command line (e.g. --file x.mp3 --to zh, --mic, --gui)
 """
 from __future__ import annotations
@@ -20,8 +21,14 @@ from pathlib import Path
 from . import tiers
 
 
+LAUNCHER_EXE = "tlwu.exe"  # packaging/launcher/tlwu_launcher.c: sys.executable is this exe in the core layout (#923)
+
+
 def is_bundled() -> bool:
-    return bool(getattr(sys, "frozen", False)) or "__compiled__" in globals() or os.environ.get("TLWU_BUNDLED") == "1"
+    """#1007: the launcher's SetEnvironmentVariableW(TLWU_BUNDLED) does not reach os.environ (the C runtime copied the
+    environment before it), so the core layout is also recognised by sys.executable being tlwu.exe."""
+    return (bool(getattr(sys, "frozen", False)) or "__compiled__" in globals() or os.environ.get("TLWU_BUNDLED") == "1"
+            or Path(sys.executable).name.lower() == LAUNCHER_EXE)
 
 
 def hide_own_console() -> None:
@@ -85,10 +92,10 @@ def run_setup_worker(args: list[str]) -> int:
         if hasattr(s, "reconfigure"):
             s.reconfigure(encoding="utf-8", errors="replace")
     # #801 --vulkan-pack and #771 `tlwu.exe setup --default-listen`: tinglongwu_setup.cli knows them, downloader.main does not
-    if "--vulkan-pack" in args or "--default-listen" in args:
+    if "--vulkan-pack" in args or "--gpu-pack" in args or "--default-listen" in args or "--talk" in args:  # #1007: --talk = in-app voice install
         from tinglongwu_setup import cli
 
-        if "--vulkan-pack" in args and "--app-version" not in args:  # #801: the pack must match this app's version
+        if ("--vulkan-pack" in args or "--gpu-pack" in args) and "--app-version" not in args:  # #801: the pack must match this app's version
             v = app_version()
             if v:
                 args = [*args, "--app-version", v]
@@ -155,6 +162,10 @@ def main(argv=None) -> int:
         return run_setup_worker(rest if "--models-dir" in rest else rest + ["--models-dir", str(mdir)])
     argv, cpu = split_cpu(argv)
     mdir = prepare_env(bundled, cpu)
+    if argv[:1] == ["speak-smoke"]:  # #974: one GUI speak press without the window (install-clean.yml speak-smoke)
+        from tinglongwu.speaksmoke import main as smoke_main
+
+        return smoke_main(argv[1:])
     if not argv or argv in (["--gui"], ["--setup"]):
         if bundled:
             hide_own_console()

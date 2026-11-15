@@ -24,7 +24,23 @@ Keep the two sides in step: a new channel method needs a Kotlin and a Swift impl
   rejected: unzip it first and pick the model files.
 - Build on a Mac: `cd mobile && flutter pub get && flutter build ios --release --no-codesign`
   (CI compile check: `.github/workflows/mobile-ios.yml`). Bundle ID `com.tinglongwu.mobile`, min iOS 15.
-- TestFlight: `codemagic.yaml` at the repo root (setup steps are in its header comment).
+- TestFlight (GitHub Actions): job `testflight` in `.github/workflows/mobile-ios.yml` archives, signs (automatic signing
+  with an App Store Connect API key) and uploads on every push to `dev` that touches `mobile/**`, and on manual
+  *Run workflow*. It skips with a notice while the secrets below are missing; PRs never run it. Owner one-time steps
+  (no Mac needed):
+  1. developer.apple.com > Identifiers: register the App ID `com.tinglongwu.mobile`.
+  2. appstoreconnect.apple.com > Apps: create the app record with that bundle ID.
+  3. Users and Access > Integrations > App Store Connect API: create a key with the **App Manager** role; download
+     `AuthKey_<KEYID>.p8` (only once) and note the Key ID and Issuer ID. Team ID is under Membership details.
+  4. Set the secrets (PowerShell):
+     ```
+     gh secret set ASC_KEY_ID -R sunososobro-hub/tinglongwu --body "<KEYID>"
+     gh secret set ASC_ISSUER_ID -R sunososobro-hub/tinglongwu --body "<ISSUER>"
+     gh secret set APPLE_TEAM_ID -R sunososobro-hub/tinglongwu --body "<TEAMID>"
+     Get-Content -Raw AuthKey_<KEYID>.p8 | gh secret set ASC_KEY_P8 -R sunososobro-hub/tinglongwu
+     ```
+  The build number is the workflow run number. Alternative: `codemagic.yaml` at the repo root (setup steps in its
+  header comment) is kept as a fallback.
 - Icons: `python3 tool/gen_ios_icons.py` (needs Pillow + `rsvg-convert`).
 - Not done yet: Metal for the translator (`gpuLayers: 0`, CPU like Android), and the increased-memory-limit entitlement
   (the 1.1 GB translator plus ASR is tight on 4 GB phones).
@@ -55,13 +71,19 @@ Keep `tlwu-release.jks` and the password backed up offline; losing them means us
 
 ## Google Play (AAB + model asset packs)
 The `mobile-apk` workflow also builds `app-release.aab` for Google Play. The models do not fit in the
-200 MB base, so they ride in two on-demand Play Asset Delivery packs: `models_asr` (SenseVoice + Silero
-VAD) and `models_llm` (Hy-MT2 GGUF). CI fills them from the same official sources as the models zip
-(`tool/fill_asset_packs.py`, size + SHA-256 checked against the manifest); in git the pack folders are
-empty. The Play Store does the download, so the app still has no INTERNET permission. When the app was
-installed from Play, the Import screen shows **從 Play 下載模型 / Get models**: the packs are fetched,
-every file goes through the same checked import, then the packs are removed to free the space. A
-side-loaded APK does not show the button and keeps the manual zip import.
+200 MB base, so they ride in two **fast-follow** Play Asset Delivery packs: `models_asr` (SenseVoice +
+Silero VAD, ~240 MB) and `models_llm` (Hy-MT2 GGUF, ~1.13 GB). Play downloads them right after install,
+so a Play user never imports anything; the Play Store does the download, so the app still has no
+INTERNET permission. CI fills the packs from the same official sources as the models zip
+(`tool/fill_asset_packs.py`, size + SHA-256 checked against the manifest; in git the pack folders are
+empty) and checks the AAB: both packs fast-follow, each <= 1.5 GB, together <= 4 GB.
+
+The app reads the models in place from the pack folders (`AssetPackManager.getPackLocation`), with no
+copy, so they take the space only once. A file already in `files/models/` (imported, adb-pushed, or
+copied by the older on-demand flow) always wins and is never replaced or deleted. If the app is
+opened before Play has finished, it shows 「正在下載翻譯需要的檔案（第一次使用才需要）」 with a progress
+bar and MB done / total, waits for Wi-Fi (or Play's "use mobile data?" dialog), and offers 「重試」
+after a failure or with no network; it then goes straight to listening. A side-loaded APK has no packs and keeps **匯入模型 / Import models**.
 
 Owner steps, once:
 1. Release key secrets as in "Signing" above (that key becomes the Play **upload key**; Play App

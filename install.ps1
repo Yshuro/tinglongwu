@@ -3,7 +3,7 @@
 #   install.ps1 -DryRun             detect only, print every command, install nothing
 #   -SkipModels  -SkipShortcut      skip steps 5-6 / 7   -Cpu  force the CPU path
 #   -FromSetup                      run by the setup wizard (the summary points to Windows Settings > Apps to uninstall)
-param([switch]$DryRun, [switch]$SkipModels, [switch]$SkipShortcut, [switch]$Cpu, [switch]$FromSetup)
+param([switch]$DryRun, [switch]$SkipModels, [switch]$SkipShortcut, [switch]$Cpu, [switch]$FromSetup, [string]$Lang = '')
 
 $ErrorActionPreference = 'Continue'
 # CI-only: TLWU_SKIP_MODELS=1 / TLWU_SKIP_SHORTCUT=1 behave like -SkipModels / -SkipShortcut (used by .github/workflows/install-test.yml)
@@ -28,15 +28,22 @@ $LlamaWhyCpu = 'from tinglongwu.llamacheck import self_check as s; print(s()[1])
 $GpuMinMB  = 4096
 . (Join-Path (Join-Path $Root 'scripts') 'install_helpers.ps1')   # time estimates + Invoke-TlwuNative (#87)
 $Gpu = $false; $ModelGB = 0; $HyCpu = $false
+# #1002: -Lang zh-TW|zh-CN -> Chinese only, anything else (en, ja, ru) -> English only.
+# Empty -Lang keeps the exact old bilingual text: $both when given (en-first lines), else "中文 / English".
+function Loc($zh, $en, $both = $null) {
+    if (-not $Lang) { if ($null -ne $both) { return $both } return "$zh / $en" }
+    if ($Lang -like 'zh*') { return $zh }
+    return $en
+}
 function Step($n, $zh, $en) {
-    Write-Host ""; Write-Host "[$n/8] $zh / $en" -ForegroundColor Cyan
+    Write-Host ""; Write-Host "[$n/8] $(Loc $zh $en)" -ForegroundColor Cyan
     Write-Host "      $(Format-TlwuEstimate (Get-TlwuStepEstimate $n $Gpu $ModelGB))" -ForegroundColor DarkCyan
 }
 function Ok($m)   { Write-Host "  OK  $m" -ForegroundColor Green }
 function Info($m) { Write-Host "      $m" }
 function Warn($m) { Write-Host "  !!  $m" -ForegroundColor Yellow; [void]$Warnings.Add($m) }
 function Die($zh, $en) {
-    Write-Host ""; Write-Host "  XX  $zh" -ForegroundColor Red; Write-Host "      $en" -ForegroundColor Red
+    Write-Host ""; if ($Lang) { Write-Host "  XX  $(Loc $zh $en)" -ForegroundColor Red } else { Write-Host "  XX  $zh" -ForegroundColor Red; Write-Host "      $en" -ForegroundColor Red }
     exit 1
 }
 # Run a native command; in -DryRun only print it. Returns $true on exit code 0.
@@ -53,7 +60,16 @@ function Capture($exe, [string[]]$a) {   # stdout of a native command, '' on fai
 
 Write-Host "=== 聽攏有 tinglongWu installer ===" -ForegroundColor White
 if ($DryRun) { Write-Host "*** DRY RUN: nothing will be installed or downloaded / 試跑模式：不會安裝或下載任何東西 ***" -ForegroundColor Yellow }
-Info "Folder / 資料夾: $Root"
+Info "$(Loc '資料夾' 'Folder' 'Folder / 資料夾'): $Root"
+# #1002: the language picked on the first wizard page becomes the app UI language (read by tinglongwu.i18n at first launch)
+if ($Lang -and -not $DryRun) {
+    $cfgDir = if ($env:TLWU_CONFIG_DIR) { $env:TLWU_CONFIG_DIR } else { Join-Path $env:APPDATA 'tinglongwu' }
+    $ui = if ($Lang -like 'zh*') { 'zh-TW' } elseif ($Lang -like 'ru*') { 'ru' } else { 'en' }
+    New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+    $cfg = Join-Path $cfgDir 'config'
+    [string[]]$keep = @(if (Test-Path -LiteralPath $cfg) { Get-Content -LiteralPath $cfg | Where-Object { $_ -and $_ -notmatch '^ui_lang=' } })
+    Set-Content -LiteralPath $cfg -Value ($keep + "ui_lang=$ui") -Encoding ascii
+}
 Info "Whole install: about 10-65 min depending on your PC and connection (exact estimate after step 2). 全程約 10-65 分鐘，第 2 步後顯示準確預估。"
 
 # ---------------------------------------------------------------- 1. Python
@@ -267,9 +283,13 @@ function Make-Shortcut($name, $target, $arguments) {
 if ($SkipShortcut) { Info "-SkipShortcut: skipped / 略過" }
 else {
     if (Test-Path $VGui) { Make-Shortcut '聽攏有 tinglongWu' $VGui '' } else { Make-Shortcut '聽攏有 tinglongWu' $VPyW '-m tinglongwu.gui' }
-    if ($DryRun -or (Test-Path $TalkPs1)) {
-        Make-Shortcut '聽攏有 說話模式' "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" "-NoExit -ExecutionPolicy Bypass -File `"$TalkPs1`""
-    } else { Info "No tlwu-talk.ps1 (talk mode not set up): talk shortcut skipped / 未建立說話模式捷徑" }
+    # One icon: speaking is built into the main app, so the old separate talk-mode shortcut is gone (and removed
+    # from earlier installs). tlwu-talk.ps1 stays for command-line use.
+    $OldTalk = Join-Path ([Environment]::GetFolderPath('Desktop')) '聽攏有 說話模式.lnk'
+    if (Test-Path $OldTalk) {
+        if ($DryRun) { Write-Host "  [dry-run] remove old shortcut $OldTalk" -ForegroundColor DarkGray }
+        else { try { Remove-Item $OldTalk -Force -ErrorAction Stop; Info "Removed the old talk-mode shortcut / 已移除舊的說話模式捷徑" } catch { } }
+    }
 }
 
 # ---------------------------------------------------------------- 8. self-test + summary
@@ -292,17 +312,17 @@ else {
     }
 }
 Write-Host ""
-Write-Host "  Installed / 已安裝:" -ForegroundColor White
+Write-Host "  $(Loc '已安裝' 'Installed' 'Installed / 已安裝'):" -ForegroundColor White
 foreach ($i in $Installed) { Write-Host "    - $i" }
-Write-Host "  Translation engine / 翻譯引擎: $Engine" -ForegroundColor White
-Write-Host "  Self-test / 自我測試: $SelfTest" -ForegroundColor White
+Write-Host "  $(Loc '翻譯引擎' 'Translation engine' 'Translation engine / 翻譯引擎'): $Engine" -ForegroundColor White
+Write-Host "  $(Loc '自我測試' 'Self-test' 'Self-test / 自我測試'): $SelfTest" -ForegroundColor White
 if ($Warnings.Count -gt 0) {
-    Write-Host "  Warnings / 注意:" -ForegroundColor Yellow
+    Write-Host "  $(Loc '注意' 'Warnings' 'Warnings / 注意'):" -ForegroundColor Yellow
     foreach ($w in $Warnings) { Write-Host "    - $w" -ForegroundColor Yellow }
 }
 Write-Host ""
 Write-Host "  Launch / 啟動: double-click the desktop shortcut '聽攏有 tinglongWu' (or $VGui)" -ForegroundColor White
-Write-Host "  Talk mode / 說話模式: desktop shortcut '聽攏有 說話模式' (Meet microphone = CABLE Output)" -ForegroundColor White
+Write-Host "  Talk mode / 說話模式: in the same app, press 'I speak' (Meet microphone = CABLE Output)" -ForegroundColor White
 foreach ($l in (Get-TlwuUninstallHint $Root ([bool]$FromSetup))) { Write-Host $l }
 if ($DryRun) { Write-Host ""; Write-Host "  (dry run finished, nothing was changed / 試跑結束，未做任何更動)" -ForegroundColor Yellow }
 exit 0

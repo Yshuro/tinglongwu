@@ -313,6 +313,11 @@ def make_translator(engine: str, mdir, zh_variant: str, dev: str, say=print, cho
                 raise RuntimeError(tr.hy_error)
             tr.hy.preload()
         except Exception as e:  # noqa: BLE001 - OOM / driver / llama.cpp load errors: stop, never switch engines
+            from .minspec import cpu_has_avx2
+
+            if cpu_has_avx2() is False:  # #1014: no repair can help a CPU below the minimum spec
+                raise SystemExit(f"tlwu: Hy-MT2 failed to load: this CPU lacks AVX2 (below the minimum spec, see "
+                                 f"README, System requirements); {str(e)[:120]}") from e
             raise SystemExit(f"tlwu: Hy-MT2 failed to load on {dev}: {str(e)[:200]}. Repair it with "
                              f"`tlwu-setup {flag}` (and `pip install -r requirements-llama-cpu.txt` on a CPU-only "
                              "PC).") from e
@@ -627,6 +632,16 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
             from .reverse.gate import segment_gate  # #968: a spoken line goes out in the user's voice
 
             seg_gate = segment_gate(getattr(vgate, "reject", None))
+        muted = getattr(a, "mic_mute", None)  # #1028: the GUI mic toggle silences this leg's capture only
+        playback = getattr(sink, "playback", None) if (a.mic and not a.file) else None
+        if playback is not None:  # #1052: half-duplex: our own voice must not be heard by our own mic
+            from .capture.base import AnyOf
+
+            muted = AnyOf(muted, playback.busy) if muted is not None else AnyOf(playback.busy)
+        if muted is not None:
+            from .capture.base import MuteSource
+
+            source = MuteSource(source, muted)
         announce_ready(status, transcript_only=bool(getattr(a, "transcript_only", False)), summary=prog.finish())
         run(source, segmenter, asr, translator, sink, a.to, merger, audio_clock=audio_clock, draft=draft,
             stop_event=stop, log=lat, on_latency=ctl.observe if ctl else None,

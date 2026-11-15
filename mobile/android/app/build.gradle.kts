@@ -39,7 +39,7 @@ android {
         }
     }
 
-    // Model packs for Google Play (on-demand, downloaded by the Play Store, so no INTERNET here).
+    // Model packs for Google Play (fast-follow, downloaded by the Play Store, so no INTERNET here).
     assetPacks += listOf(":models_asr", ":models_llm")
 
     // Release key from the environment (CI decodes the ANDROID_KEYSTORE_B64 secret into a file).
@@ -59,6 +59,8 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName(if (tlwuKeystore != null) "tlwuRelease" else "debug")
+            // Room/WorkManager keep rules for R8 (#1023).
+            proguardFiles("proguard-rules.pro")
         }
     }
 }

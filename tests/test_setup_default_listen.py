@@ -98,3 +98,51 @@ def test_progress_lines_are_flushed_for_the_wizard_that_polls_install_log(tmp_pa
 def test_download_size_constant_matches_the_progress_bar_sizes():
     want = sum(tiers.SIZES[k] for k in defaults.DEFAULT_LISTEN_KEYS) // defaults.MB
     assert abs(defaults.DEFAULT_LISTEN_DOWNLOAD_MB - want) <= want * 0.05
+
+
+def _kokoro_files(tmp_path):
+    k = tmp_path / "kokoro"
+    k.mkdir()
+    for n in ("kokoro-v1.0.int8.onnx", "voices-v1.0.bin"):
+        (k / n).write_bytes(b"x")
+
+
+def _fake_venv(tmp_path):
+    from tinglongwu_setup import talk
+
+    venv = tmp_path / "venv"
+    py = talk.venv_python(venv)
+    py.parent.mkdir(parents=True)
+    py.write_bytes(b"x")
+    return venv
+
+
+def test_summary_says_voice_not_installed_before_ready(tmp_path):
+    lines = []
+    defaults.run(tmp_path, _fake([]), out=lines.append, venv=tmp_path / "none")
+    assert lines[-2] == defaults.VOICE_NOTE and lines[-1].startswith("READY default-listen")
+    assert not defaults.voice_installed(tmp_path, tmp_path / "none")
+
+
+def test_voice_note_when_model_present_but_kokoro_venv_missing(tmp_path):
+    _kokoro_files(tmp_path)  # owner's 11:12 case: model verified, venv absent
+    lines = []
+    defaults.run(tmp_path, _fake([]), out=lines.append, venv=tmp_path / "none")
+    assert defaults.VOICE_NOTE in lines
+
+
+def test_no_voice_note_when_kokoro_files_and_venv_present(tmp_path):
+    _kokoro_files(tmp_path)
+    venv = _fake_venv(tmp_path)
+    lines = []
+    defaults.run(tmp_path, _fake([]), out=lines.append, venv=venv)
+    assert defaults.VOICE_NOTE not in lines and defaults.voice_installed(tmp_path, venv)
+
+
+# ---- #1007: the in-app voice install runs `tlwu.exe --run-setup --talk ...`
+def test_run_setup_worker_routes_talk_to_the_setup_cli(monkeypatch):
+    got = []
+    monkeypatch.setattr(cli, "main", lambda a: got.append(a) or 0)
+    monkeypatch.setattr(downloader, "main", lambda a: (_ for _ in ()).throw(AssertionError("downloader")))
+    assert app_main.run_setup_worker(["--talk", "--models-dir", "x"]) == 0
+    assert got == [["--talk", "--models-dir", "x"]]

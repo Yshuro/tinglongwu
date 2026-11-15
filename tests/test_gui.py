@@ -9,6 +9,8 @@ import pytest
 from tinglongwu.gui import core
 from tinglongwu.sink import Result
 
+MAIN_BAR_MAX_W = 560  # #1028: the chat-style main window's bottom bar (mic / floating / freeze toggles + Start)
+
 
 def test_queue_sink_final():
     q = queue.Queue()
@@ -264,6 +266,15 @@ def test_floating_bar_off_by_default_and_log_font_persist(tmp_path):
     assert got["log_font_size"] == core.FONT_MAX and got["floating_bar"] is False
 
 
+def _no_speak_dialogs(monkeypatch):
+    """#1001: every Start also runs the speak leg; never open the real VB-CABLE / Kokoro install questions."""
+    from tinglongwu import vbcable
+    from tinglongwu.gui import voice_install
+
+    monkeypatch.setattr(vbcable, "needs_offer", lambda names, platform=None: False)
+    monkeypatch.setattr(voice_install, "offer_needed", lambda run, mdir: False)
+
+
 @pytest.fixture
 def gui_app(tmp_path, monkeypatch):
     """A real App on a real (virtual) display with a worker that just waits for Stop; settings in tmp_path."""
@@ -285,6 +296,7 @@ def gui_app(tmp_path, monkeypatch):
         self.q.put(("stopped",))
 
     monkeypatch.setattr(app.App, "_work", fake_work)
+    _no_speak_dialogs(monkeypatch)
     # #314 first-launch overlay already closed: these tests check the plain session flow (overlay: test_gui_tour_314)
     (tmp_path / "tinglongwu").mkdir()
     (tmp_path / "tinglongwu" / "gui.json").write_text('{"tour_seen": true}', "utf-8")
@@ -296,8 +308,13 @@ def gui_app(tmp_path, monkeypatch):
 
 
 def _log(a):
+    """The chat list as plain lines (#1028): bubble padding and the 'Other side' / 'Me' heading lines dropped."""
+    from tinglongwu.i18n import t
+
     a.root.update()
-    return a.log_text.get("1.0", "end-1c")
+    skip = {t("gui_chat_other"), t("gui_chat_me"), t("gui_chat_empty")}
+    lines = [ln.strip() for ln in a.log_text.get("1.0", "end-1c").split("\n")]
+    return "\n".join(ln for ln in lines if ln and ln not in skip)
 
 
 def test_start_shows_listening_in_main_window_and_bar_stays_hidden(gui_app):
@@ -309,14 +326,14 @@ def test_start_shows_listening_in_main_window_and_bar_stays_hidden(gui_app):
     a.q.put(("final", "privet", "你好"))
     a.q.put(("draft", "kak dela", "你好嗎"))
     a.poll()
-    assert _log(a) == "你好\n你好嗎"
+    assert _log(a) == "你好\nprivet\n你好嗎\nkak dela"  # #1028/#1052: the original always sits small under its bubble
     a.var_show_src.set(True)
     a._src_toggled()
-    assert _log(a) == "privet\n你好\nkak dela\n你好嗎"
+    assert _log(a) == "你好\nprivet\n你好嗎\nkak dela"
     a.toggle()  # Stop
     a.worker.join(5)
     a.poll()
-    assert _log(a) == "privet\n你好\nkak dela\n你好嗎"  # the history stays readable after Stop
+    assert _log(a) == "你好\nprivet\n你好嗎\nkak dela"  # the history stays readable after Stop
     assert a.settings["floating_bar"] is False
 
 
@@ -324,7 +341,7 @@ def test_floating_bar_toggle_shows_bar_with_listening(gui_app):
     a = gui_app
     a.v_bar.set(True)
     a._bar_toggled()
-    assert not a.overlay.visible  # not running yet: nothing to show
+    assert a.overlay.visible  # #1028: the button shows the floating bar at once, also before Start
     a.toggle()
     a.root.update()
     assert a.overlay.visible and a.overlay.win.state() == "normal"
@@ -335,7 +352,7 @@ def test_floating_bar_toggle_shows_bar_with_listening(gui_app):
     assert a.overlay.text.get("1.0", "end-1c") == "字幕"
     a.v_bar.set(False)
     a._bar_toggled()
-    assert not a.overlay.visible and _log(a) == "字幕"  # log keeps working without the bar
+    assert not a.overlay.visible and _log(a).startswith("字幕")  # log keeps working without the bar
     assert core.load_settings()["floating_bar"] is True  # saved at Start (settings live in tmp_path)
 
 
@@ -346,7 +363,7 @@ def test_log_follows_newest_unless_scrolled_up(gui_app):
         a.q.put(("final", f"s{i}", f"line {i}"))
     a.poll()
     text = _log(a)
-    assert text.startswith("line 50\n") and text.endswith("line 249")  # 200 kept
+    assert text.startswith("line 50\ns50\n") and text.endswith("line 249\ns249")  # 200 kept
     assert a.log_text.dlineinfo("end-1c") is not None  # newest line is on screen
     a.log_text.yview("20.0")  # user scrolls back
     a.root.update()
@@ -366,18 +383,18 @@ def test_log_follows_newest_unless_scrolled_up(gui_app):
 
 def test_log_font_buttons_and_pause(gui_app):
     a = gui_app
-    w0 = a.panel.winfo_reqwidth()
+    w0 = a.root.winfo_reqwidth()
     a.bump_log_font(8)
     a.root.update()
-    assert a.settings["log_font_size"] == 22 and a.panel.winfo_reqwidth() == w0  # window does not grow
-    assert str(a.log_text.tag_cget("final", "font")).split()[-1] == "22"
+    assert a.settings["log_font_size"] == 22 and a.root.winfo_reqwidth() == w0  # window does not grow
+    assert str(a.log_text.tag_cget("other_final", "font")).split()[-1] == "22"
     a.toggle()
     a.set_paused(True)
     a.q.put(("final", "s", "while paused"))
     a.poll()
     assert _log(a) == "Listening..."  # frozen
     a.set_paused(False)
-    assert _log(a) == "while paused"  # nothing lost
+    assert _log(a) == "while paused" + chr(10) + "s"  # nothing lost (#1052: the original sits under it)
     a.v_ui_lang.set("繁體中文")
     a.state = core.SubtitleState(core.HISTORY_LINES)
     a.switch_lang()
@@ -396,7 +413,7 @@ def test_start_is_disabled_and_counts_seconds_until_models_are_ready(gui_app):
     a.q.put(("status", "loading speech model... (0.0 s)"))
     a.load_t0 = time.monotonic() - 5.2  # 5 s into loading
     a.poll()
-    assert a.v_status.get() == "loading speech model... (0.0 s)"
+    assert a.v_status.get() == "Loading speech model... (0.0 s)"  # #1020: through i18n
     assert str(a.btn.cget("state")) == "disabled" and a.btn.cget("text") == "⏳ 5 s"
     a.q.put(("status", f"{cli.READY_STATUS} - loaded in 5.2 s (speech model 5.2 s)"))
     a.poll()
@@ -445,7 +462,7 @@ def _bound_vars(top) -> set[str]:
 
 
 def test_control_bar_is_compact_in_every_ui_language(gui_app):
-    """#455: the main window is a small bar (<= 420x60 at 100% scale), also while it counts "⏳ N s"."""
+    """#1028: the bottom bar stays within the main window's width in every UI language, also while it counts "⏳ N s"."""
     from tinglongwu.i18n import t
 
     a = gui_app
@@ -454,23 +471,21 @@ def test_control_bar_is_compact_in_every_ui_language(gui_app):
         a.switch_lang()
         # #884: the pair shows names; measure the fixture's pair plus the real defaults (auto -> zh-tw, Speak en ->
         # zh-tw) and the longest names (ja -> zh-cn, ru -> zh-tw)
-        for mode, src, target in (("listen", a.v_lang.get(), a.v_target.get()), ("listen", "auto", "zh-tw"),
-                                  ("speak", "en", "zh-tw"), ("listen", "ja", "zh-cn"), ("listen", "ru", "zh-tw")):
-            a.v_mode.set(mode)
+        for src, target in ((a.v_lang.get(), a.v_target.get()), ("auto", "zh-tw"), ("zh", "en"), ("ja", "zh-cn"),
+                            ("ru", "zh-tw")):
             a.v_lang.set(src)
             a.v_target.set(target)
             for text in (t("gui_start"), t("gui_loading", s=120)):  # the widest text the button shows
                 a.btn.configure(text=text)
                 a.root.update_idletasks()
                 pair = a.v_pair.get()
-                assert a.bar.winfo_reqwidth() <= 420 and a.bar.winfo_reqheight() <= 60, (ui, pair, text)
-                assert a.root.winfo_reqwidth() <= 420 and a.root.winfo_reqheight() <= 60, (ui, pair, text)
-    assert a.root.attributes("-topmost")
+                assert a.bar.winfo_reqwidth() <= MAIN_BAR_MAX_W, (ui, pair, text)
+                assert a.root.winfo_reqwidth() <= MAIN_BAR_MAX_W + 40, (ui, pair, text)
 
 
 
 def test_update_line_keeps_main_window_within_420px(gui_app):
-    """#698's update line sits under the #455 bar: with its widest text and both buttons it stays <= 420 px."""
+    """#698's update line sits in the main window: with its widest text and both buttons it stays narrow."""
     a = gui_app
     for ui in ("English", "Русский", "繁體中文"):
         a.v_ui_lang.set(ui)
@@ -480,7 +495,7 @@ def test_update_line_keeps_main_window_within_420px(gui_app):
                                  ("gui_upd_fail", ("gui_upd_now", "gui_upd_later"), {"why": "ConnectionResetError"})):
             a._upd_show(key, buttons, **kw)
             a.root.update_idletasks()
-            assert a.root.winfo_reqwidth() <= 420, (ui, key)
+            assert a.root.winfo_reqwidth() <= MAIN_BAR_MAX_W + 40, (ui, key)
     a._update_later()
     a.root.update_idletasks()
     assert not a.upd_frame.winfo_ismapped()
@@ -494,7 +509,7 @@ def test_adjust_panel_holds_every_setting_and_the_bar_none(gui_app):
             "model": a.v_model, "source": a.v_source, "preset": a.v_preset, "glossary": a.v_gloss,
             "save": a.v_save, "save_path": a.v_save_path, "show_src": a.var_show_src, "live_draft": a.v_live,
             "voice": a.v_voice, "voice_device": a.v_voice_dev, "floating_bar": a.v_bar}
-    in_panel = _bound_vars(a.panel)
+    in_panel = _bound_vars(a.root)  # #1028: the main window (floating-bar toggle) + the settings panel
     in_panel |= {str(v) for k, (_kind, _vals, v) in a.kind_combos.items() if a.combos[k].winfo_exists()}  # #884: named combos show a mirror var
     assert [k for k, v in keys.items() if str(v) not in in_panel] == []
     # #738: subtitle lines, font size, UI language and theme moved to the menu bar's Settings menu
@@ -511,9 +526,9 @@ def test_adjust_panel_holds_every_setting_and_the_bar_none(gui_app):
     if app_mod.sv_ttk is not None:
         menu_keys["theme"] = a.v_dark
     assert [k for k, v in menu_keys.items() if str(v) not in in_menu] == []
-    for w in (a.log_text, a.btn_pause):  # log (with A-/A+, floating-bar toggle) and Pause live in the panel too
-        assert w.winfo_toplevel() is a.panel
-    assert a.panel.state() == "withdrawn"  # first start: only the bar
+    for w in (a.log_text, a.btn_pause):  # #1028: the chat list and Freeze live in the main window
+        assert w.winfo_toplevel() is a.root
+    assert a.panel.state() == "withdrawn"  # first start: only the main window
     a.btn_adjust.invoke()
     a.root.update()
     assert a.panel.state() == "normal"
@@ -522,40 +537,35 @@ def test_adjust_panel_holds_every_setting_and_the_bar_none(gui_app):
 
 
 def test_bar_mode_pair_and_status_dot(gui_app, monkeypatch):
-    """#455: Listen/Speak + Start run the saved / #294 speak session, the pair label follows the boxes, the dot
-    follows the session."""
+    """#455 / #1001: the bar has no Listen / Speak choice; its Start runs both legs, the pair label shows both ways,
+    the dot follows the session."""
     from tinglongwu import cli
+
+    from tinglongwu.gui import app
 
     a = gui_app
     runs = _record_runs(a, monkeypatch)
-    assert a.v_mode.get() == "listen"
+    monkeypatch.setattr(app, "meeting_cable", lambda: "CABLE Input (VB-Audio Virtual Cable)")  # no "no CABLE" panel
+    assert not hasattr(a, "v_mode")
+    assert not [w for w in a.bar.winfo_children() if w.winfo_class() == "TRadiobutton"]
     a.v_target.set("en")
-    for w in a.bar.winfo_children():
-        if "text" in w.keys() and w.cget("text") == "Speak":
-            w.invoke()
-    assert a.v_mode.get() == "speak" and a.v_pair.get() in ("English→Traditional Chinese", "English →\nTraditional Chinese", "English →\nChinese (Trad.)")  # #884: names, not codes (2 lines: fits 420 px); the Speak direction
-    a.btn.invoke()  # Speak + Start: mic in my language (en) -> zh-tw, as the #294 "I speak" button
-    a.toggle()
-    a.worker.join(5)
-    a.poll()
-    assert (runs[0]["source"], runs[0]["lang"], runs[0]["target"]) == ("mic", "en", "zh-tw")
-    a.v_mode.set("listen")
     a.v_lang.set("auto")
-    assert a.v_pair.get() == "Auto→English"
+    assert a.v_pair.get() == ""  # #1028: the pickers show the pair; this line is only for "same language"
     assert a.dot_state == "idle"
-    a.btn.invoke()  # Listen + Start: the saved settings, as the old Start button
-    assert a.dot_state == "loading" and (runs[1]["source"], runs[1]["target"]) == ("system", "en")
+    a.btn.invoke()  # Start: listen (PC sound -> en) + speak (mic, en -> zh-tw)
+    assert a.dot_state == "loading" and (runs[0]["source"], runs[0]["target"]) == ("system", "en")
+    assert (a.speak_run["source"], a.speak_run["lang"], a.speak_run["target"]) == ("mic", "en", "zh-tw")
     a.q.put(("status", f"{cli.READY_STATUS} - loaded in 1.0 s (speech model 1.0 s)"))
     a.poll()
     assert a.dot_state == "on"
-    a.toggle()
+    a.btn.invoke()  # Stop
     a.worker.join(5)
     a.poll()
     assert a.dot_state == "idle" and a.btn.cget("text") == "Start"
     assert a.panel.state() == "withdrawn"
-    a.q.put(("error", "boom"))  # an error opens the Adjust panel, where its message is shown
+    a.q.put(("error", "boom"))  # an error is shown in the main window's status line
     a.poll()
-    assert a.dot_state == "error" and a.panel.state() == "normal"
+    assert a.dot_state == "error" and "boom" in a.v_status.get()
 
 
 # -- #294 easy start: first-screen buttons on a real App -------------------------------------------------------
@@ -574,31 +584,30 @@ def _record_runs(a, monkeypatch):
     return runs
 
 
-def _btn(a, mode):
-    b = a.quick_btns[mode]
-    return b.cget("text"), str(b.cget("state"))
+def _btn(a):
+    return a.both_btn.cget("text"), str(a.both_btn.cget("state"))
 
 
-def test_one_click_listen_loading_then_ready_then_stop(gui_app, monkeypatch):
-    """Fresh profile: the only click is "Listen to others"; Loading... until models are ready, then a Ready hint."""
+def test_one_click_start_loading_then_ready_then_stop(gui_app, monkeypatch):
+    """Fresh profile: the only click is Start (#1001: listen + speak); Loading... until ready, then a Ready hint."""
     from tinglongwu import cli
 
     a = gui_app
     runs = _record_runs(a, monkeypatch)
-    assert _btn(a, "listen") == ("Listen to others", "normal") and _btn(a, "speak") == ("I speak", "normal")
+    assert _btn(a) == ("Start", "normal")
     a.v_target.set("zh-tw")
-    a.quick_btns["listen"].invoke()  # click 1
-    assert _btn(a, "listen") == ("⏳ 0 s", "disabled") and _btn(a, "speak")[1] == "disabled"
+    a.both_btn.invoke()  # click 1
+    assert _btn(a) == ("\u23f3 0 s", "disabled")
     a.q.put(("status", f"{cli.READY_STATUS} - loaded in 2.0 s"))
     a.poll()
-    assert a.v_status.get().startswith("Ready - start playback now")
-    assert _btn(a, "listen") == ("Stop", "normal") and _btn(a, "speak") == ("I speak", "disabled")
+    assert a.v_status.get().startswith("Ready - play the video or speak")
+    assert _btn(a) == ("Stop", "normal")
     run = runs[0]
-    assert (run["source"], run["target"]) == ("system", "zh-tw")
-    a.quick_btns["listen"].invoke()  # Stop
+    assert (run["source"], run["target"]) == ("system", "zh-tw") and a.speak_run["source"] == "mic"
+    a.both_btn.invoke()  # Stop
     a.worker.join(5)
     a.poll()
-    assert _btn(a, "listen") == ("Listen to others", "normal") and _btn(a, "speak") == ("I speak", "normal")
+    assert _btn(a) == ("Start", "normal")
 
 
 def test_speak_keeps_my_language_remembered(gui_app, tmp_path, monkeypatch):
@@ -674,8 +683,8 @@ def test_update_controls_are_always_reachable_in_the_help_menu_756(_wizard_insta
     assert t("gui_upd_check") in labels and t("gui_upd_auto") in labels and t("gui_menu_about") in labels
     kids = list(_descendants(a.panel))
     setup_btn = next(w for w in kids if w.winfo_class() == "TButton" and w.cget("text") == t("gui_check_setup"))
-    log_row = int(a.log_text.master.grid_info()["row"])
-    assert int(a.act_row.grid_info()["row"]) < log_row and setup_btn.master is a.act_row
+    assert setup_btn.master is a.act_row  # #1042: Check setup sits in the action row, never inside the chat list
+    assert a.log_text not in list(_descendants(a.act_row))
 
 
 def test_no_update_controls_on_a_git_checkout_756(gui_app):
@@ -683,3 +692,54 @@ def test_no_update_controls_on_a_git_checkout_756(gui_app):
 
     assert not any(w.winfo_class() == "TButton" and w.cget("text") == t("gui_upd_check")
                    for w in _descendants(gui_app.panel))
+
+
+def test_advanced_save_path_and_voice_device_have_labels_1042(gui_app):
+    from tinglongwu.i18n import t
+
+    a = gui_app
+    texts = {w.cget("text") for w in _descendants(a.frm) if w.winfo_class() == "TLabel"}
+    assert t("gui_save_path") in texts and t("gui_voice_device") in texts
+
+
+def test_download_failure_stays_in_main_window_1042(gui_app):
+    from tinglongwu.i18n import t
+
+    a = gui_app
+    assert a.panel.state() == "withdrawn"
+    a._pack_done("voice-pack", 1)
+    a.root.update()
+    assert a.panel.state() == "withdrawn"  # no Settings pop-up
+    assert a.v_status.get() == t("gui_dl_fail", model="voice-pack")
+
+
+def test_floating_button_follows_the_bar_after_stop_1042(gui_app):
+    a = gui_app
+    assert not a.overlay.visible and not a.v_bar.get()  # launch: button matches the hidden bar
+    a.v_bar.set(True)
+    a._bar_toggled()
+    a.toggle()
+    a.root.update()
+    assert a.overlay.visible and a.v_bar.get()
+    a.toggle()  # Stop hides the bar
+    a.worker.join(5)
+    a.poll()
+    assert not a.overlay.visible and not a.v_bar.get()
+    a.v_bar.set(not a.v_bar.get())  # what the click does to the Checkbutton variable
+    a._bar_toggled()
+    assert a.overlay.visible  # one click shows it again
+
+
+def test_mic_off_note_keeps_other_notice_1042(gui_app):
+    from tinglongwu.i18n import t
+
+    a = gui_app
+    a.listening, a.load_t0 = True, None
+    a.v_notice.set("no cable here")
+    a.v_mic.set(False)
+    a._mic_toggled()
+    assert "no cable here" in a.v_notice.get() and t("gui_mic_off_note") in a.v_notice.get()
+    a.v_mic.set(True)
+    a._mic_toggled()
+    assert a.v_notice.get() == "no cable here"
+    a.listening = False
