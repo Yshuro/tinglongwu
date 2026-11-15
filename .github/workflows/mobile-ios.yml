@@ -43,6 +43,13 @@ jobs:
           plist=build/ios/iphoneos/Runner.app/Info.plist
           /usr/libexec/PlistBuddy -c "Print :NSMicrophoneUsageDescription" "$plist" > /dev/null
           /usr/libexec/PlistBuddy -c "Print :ITSAppUsesNonExemptEncryption" "$plist"
+      - name: Check broadcast extension (看影片翻譯, #1076) is embedded
+        run: |
+          appex=build/ios/iphoneos/Runner.app/PlugIns/Broadcast.appex
+          test -f "$appex/Info.plist"
+          /usr/libexec/PlistBuddy -c "Print :NSExtension:NSExtensionPointIdentifier" "$appex/Info.plist" | grep -qx com.apple.broadcast-services-upload
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$appex/Info.plist" | grep -qx com.tinglongwu.mobile.broadcast
+          /usr/libexec/PlistBuddy -c "Print :UIBackgroundModes:0" build/ios/iphoneos/Runner.app/Info.plist | grep -qx audio
 
   testflight:
     # Never on pull requests (no secrets there). Skips with a notice when the secrets are not set.

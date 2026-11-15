@@ -22,6 +22,12 @@ Keep the two sides in step: a new channel method needs a Kotlin and a Swift impl
 - Models: no INTERNET use, same as Android. Download `tlwu-mobile-models.zip` in Safari, then **Import models** and pick it
   in Files. The importer reads the official zip (stored, uncompressed). A zip made by the Files app "Compress" is deflated and is
   rejected: unzip it first and pick the model files.
+- 看影片翻譯 (#1076): iOS cannot capture other apps' audio or draw over them, so `ios/Broadcast/` is a ReplayKit
+  broadcast upload extension (`com.tinglongwu.mobile.broadcast`) that writes 16 kHz mono PCM16 into a ring file in the
+  App Group `group.com.tinglongwu.mobile` (`BroadcastRing.swift`, compiled into both targets). The app
+  (`PhoneAudioBridge.swift`) streams it on `tlwu/playback_pcm` like Android, stays alive in the background with silent
+  audio (`UIBackgroundModes` audio, mixWithOthers) and shows subtitles in Picture-in-Picture (`SubtitlePiP.swift`).
+  No ASR in the extension (50 MB limit). DRM apps (Netflix etc.) deliver silence.
 - Build on a Mac: `cd mobile && flutter pub get && flutter build ios --release --no-codesign`
   (CI compile check: `.github/workflows/mobile-ios.yml`). Bundle ID `com.tinglongwu.mobile`, min iOS 15.
 - TestFlight (GitHub Actions): job `testflight` in `.github/workflows/mobile-ios.yml` archives, signs (automatic signing
