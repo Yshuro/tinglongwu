@@ -77,9 +77,11 @@ LEGACY_HEAD = "dev"            # #976 transition: the release PR opened by the o
 # #976: the required checks that release-pr.yml dispatches on the snapshot ref. ci and windows-build are not
 # dispatched: their dev-push runs are never cancelled (ci has no concurrency group, windows-build #888) and a
 # windows-build on a release/ ref could not use dev's build cache.
-SNAPSHOT_DISPATCH = ("e2e", "audio-routing", "hw-tests")
-WORKFLOW_FILES = {"e2e": "e2e.yml", "audio-routing": "audio-routing.yml", "hw-tests": "hw-tests.yml"}
-REQUIRED_CHECKS = ("ci", "e2e", "windows-build", "hw-tests", "audio-routing")  # #849: VB-CABLE routing on windows-latest
+SNAPSHOT_DISPATCH = ("e2e", "audio-routing", "hw-tests", "install-clean")
+WORKFLOW_FILES = {"e2e": "e2e.yml", "audio-routing": "audio-routing.yml", "hw-tests": "hw-tests.yml",
+                  "install-clean": "install-clean.yml"}
+REQUIRED_CHECKS = ("ci", "e2e", "windows-build", "hw-tests", "audio-routing",
+                   "install-clean")  # #849: VB-CABLE routing on windows-latest; #1016: clean-Windows speak smoke
 WHATS_NEW = "## What's new"
 WHATS_NEW_FILE = "docs/whats_new.md"
 THROTTLE_RE = re.compile(r"^\s*level:\s*(\d+)\b", re.I)
@@ -164,11 +166,17 @@ def release_pr_of(pulls: list[dict], repo: str) -> dict | None:
     return None
 
 
+def _counts(run: dict) -> bool:
+    """#1016: a pull_request run of install-clean skips speak-smoke (job `if`), and a skipped job reports success, so
+    it is never evidence for the speak-smoke requirement."""
+    return not (run.get("name") == "install-clean" and run.get("event") == "pull_request")
+
+
 def check_problems(runs: list[dict], required=REQUIRED_CHECKS) -> list[str]:
     """Owner gate: the newest run of each required workflow on the commit must have succeeded."""
     out = []
     for name in required:
-        mine = [r for r in runs if r.get("name") == name]
+        mine = [r for r in runs if r.get("name") == name and _counts(r)]
         if not mine:
             out.append(f"{name}: no run on this commit")
             continue
@@ -379,7 +387,7 @@ def snapshot_plan(version: str, tags: dict[str, str], bump_sha: str, ahead: int,
         out["pr"] = True
         runs = runs_of(sha)
         for name in SNAPSHOT_DISPATCH:
-            mine = [r for r in runs if r.get("name") == name]
+            mine = [r for r in runs if r.get("name") == name and _counts(r)]
             r = max(mine, key=lambda r: r.get("id", 0)) if mine else {}
             done = r.get("status") == "completed" and r.get("conclusion") == "success"
             # an in-progress hw-tests run is never cancelled (cancel-in-progress: false); e2e / audio-routing on dev are
