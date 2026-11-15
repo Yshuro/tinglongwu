@@ -1,11 +1,10 @@
-import 'dart:io';
-
 import 'package:flutter/services.dart';
 
 import 'model_importer.dart';
 
-/// Models from Google Play Asset Delivery (PlayPacks.kt). Only when the app was installed from
-/// Play; the Play Store downloads the packs, so the app keeps no INTERNET permission.
+/// Models from Google Play Asset Delivery (PlayPacks.kt): two fast-follow packs that Play
+/// downloads right after install, so the app keeps no INTERNET permission. The files are read in
+/// place from the pack folders (ModelPaths), never copied. Only when installed from Play.
 class PlayPacks {
   static const _ch = MethodChannel('tlwu/native');
 
@@ -21,58 +20,55 @@ class PlayPacks {
 
   static Future<void> cancel() => _ch.invokeMethod('playCancel');
 
-  /// Downloads the packs, then copies every model file through [imp] (same size + SHA-256 check
-  /// as a manual import) and removes the packs to free the space.
-  /// [onProgress] gets (bytes, total, label) for the download and then for the copy.
-  static Future<ImportReport> downloadAndImport(ModelImporter imp,
-      {required void Function(int done, int total, String label) onProgress}) async {
+  /// Shows Play's "download on mobile data?" dialog again (while waiting for Wi-Fi).
+  static Future<void> confirmMobileData() async {
+    try {
+      await _ch.invokeMethod('playConfirm');
+    } catch (_) {}
+  }
+
+  /// Waits for (or restarts) the Play download of the packs. Nothing is copied: once the packs are
+  /// on the device the app reads the models from them. [onState] gets (bytes, total, state), state
+  /// as in PlayPacks.kt `stateName`.
+  static Future<PackFetch> fetch(
+      {required void Function(int done, int total, String state) onState}) async {
     _ch.setMethodCallHandler((call) async {
       if (call.method == 'playProgress') {
         final m = call.arguments as Map;
-        onProgress((m['done'] as num).toInt(), (m['total'] as num).toInt(), 'Google Play');
+        onState((m['done'] as num).toInt(), (m['total'] as num).toInt(), '${m['status']}');
       }
     });
-    Map<String, String> paths;
     try {
-      paths = (await _ch.invokeMapMethod<String, String>('playFetch')) ?? const {};
+      final paths = await _ch.invokeMapMethod<String, String>('playFetch') ?? const {};
+      return PackFetch(packs: paths.keys.toList());
     } on PlatformException catch (e) {
-      final r = ImportReport();
-      if (e.code == 'CANCELLED') {
-        r.cancelled = true;
-      } else {
-        r.problems.add('Google Play: ${e.message}');
-      }
-      return r;
+      return e.code == 'CANCELLED'
+          ? const PackFetch(error: 'cancelled')
+          : PackFetch(error: e.details is String ? e.details as String : 'error', message: e.message);
     } finally {
       _ch.setMethodCallHandler(null);
     }
-    final docs = docsFromPacks(imp, paths.values);
-    if (docs.isEmpty) {
-      return ImportReport()..problems.add('Google Play: no model files in the downloaded packs.');
-    }
-    final report = await imp.run(docs, onProgress: onProgress);
-    if (!report.cancelled && report.problems.isEmpty) {
-      try {
-        await _ch.invokeMethod('playRemove');
-      } catch (_) {} // the copy is done; a pack left behind only costs space
-    }
-    return report;
   }
 
-  /// Manifest files found in the pack folders that are not already in the models dir.
-  static List<PickedDoc> docsFromPacks(ModelImporter imp, Iterable<String> packDirs) {
-    final present = imp.presentFiles();
-    final docs = <PickedDoc>[];
-    for (final f in imp.manifest.files) {
-      if (present.contains(f.path)) continue;
-      for (final dir in packDirs) {
-        final file = File('$dir/${f.path}');
-        if (file.existsSync()) {
-          docs.add(PickedDoc(Uri.file(file.path).toString(), f.basename, file.lengthSync()));
-          break;
-        }
-      }
+  /// [fetch] for the Import screen (progress bar + report lines).
+  static Future<ImportReport> download(
+      {required void Function(int done, int total, String label) onProgress}) async {
+    final f = await fetch(onState: (d, t, _) => onProgress(d, t, 'Google Play'));
+    final r = ImportReport()..imported.addAll(f.packs);
+    if (f.error == 'cancelled') {
+      r.cancelled = true;
+    } else if (f.error != null) {
+      r.problems.add('Google Play: ${f.message ?? f.error}');
     }
-    return docs;
+    return r;
   }
+}
+
+class PackFetch {
+  const PackFetch({this.packs = const [], this.error, this.message});
+  final List<String> packs;
+
+  /// null = done; else network, storage, cancelled or a Play error code.
+  final String? error;
+  final String? message;
 }

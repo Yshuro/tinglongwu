@@ -6,9 +6,8 @@ import '../services/model_paths.dart';
 import '../services/pipeline.dart';
 
 class LoadingScreen extends StatelessWidget {
-  const LoadingScreen({super.key, required this.stage, this.fraction = 0});
+  const LoadingScreen({super.key, required this.stage});
   final Stage stage;
-  final double fraction; // copy progress for Stage.copyingModels
 
   @override
   Widget build(BuildContext context) {
@@ -17,14 +16,10 @@ class LoadingScreen extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            CircularProgressIndicator(value: stage == Stage.copyingModels ? fraction : null),
+            const CircularProgressIndicator(),
             const SizedBox(height: 24),
             Text(
-              switch (stage) {
-                Stage.starting => '啟動中…',
-                Stage.copyingModels => '首次啟動，準備模型中 ${(fraction * 100).toStringAsFixed(0)}%…',
-                _ => '載入模型中（首次約 10-30 秒）…',
-              },
+              stage == Stage.starting ? '啟動中…' : '載入模型中（首次約 10-30 秒）…',
               style: const TextStyle(fontSize: 22, color: Colors.white70),
             ),
           ],

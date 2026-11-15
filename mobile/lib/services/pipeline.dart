@@ -10,14 +10,13 @@ import '../logic/phone_audio.dart';
 import '../logic/subtitle_trim.dart';
 import 'app_log.dart';
 import 'asr_worker.dart';
-import 'bundled_models.dart';
-import 'model_importer.dart';
 import 'model_paths.dart';
+import 'play_packs.dart';
 import 'playback_capture.dart';
 import '../logic/target_language.dart';
 import 'translator.dart';
 
-enum Stage { starting, copyingModels, loadingModels, listening, missingModels, error }
+enum Stage { starting, downloadingModels, loadingModels, listening, missingModels, error }
 
 /// Where the audio comes from: the microphone, or other apps' playback (#998, Android 10+).
 enum AudioSourceKind { mic, phone }
@@ -48,8 +47,12 @@ class Pipeline extends ChangeNotifier {
   Stage stage = Stage.starting;
   String? errorText;
   List<String> missingFiles = const [];
-  /// 0..1 while bundled models are copied on first launch (Stage.copyingModels).
-  double copyFraction = 0;
+
+  /// First-run Play download (Stage.downloadingModels): bytes, total, PlayPacks.kt state name,
+  /// and the error (network, storage, cancelled, Play code) once it stopped.
+  int dlDone = 0, dlTotal = 0;
+  String dlState = 'pending';
+  String? dlError;
   ModelPaths? paths;
 
   String draftRu = '';
@@ -106,19 +109,22 @@ class Pipeline extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// First launch of a Play install with install-time packs: copy the models out of the packs.
-  Future<void> _copyBundled(String modelsDir) async {
-    try {
-      final imp = ModelImporter(await ModelImporter.loadManifest(), modelsDir);
-      final r = await BundledModels.copyMissing(imp, onProgress: (done, total, _) {
-        if (stage != Stage.copyingModels) stage = Stage.copyingModels;
-        copyFraction = total > 0 ? done / total : 0;
-        notifyListeners();
-      });
-      if (r != null) _log.i('bundled models copied ${r.imported} problems ${r.problems}');
-    } catch (e) {
-      _log.e('bundled models copy failed: $e');
-    }
+  Future<bool> _downloadPacks() async {
+    stage = Stage.downloadingModels;
+    dlError = null;
+    dlState = 'pending';
+    notifyListeners();
+    final r = await PlayPacks.fetch(onState: (d, t, st) {
+      dlDone = d;
+      dlTotal = t;
+      dlState = st;
+      notifyListeners();
+    });
+    if (r.error == null) return true;
+    _log.e('play packs: ${r.error} ${r.message ?? ''}');
+    dlError = r.error;
+    notifyListeners();
+    return false;
   }
 
   Future<void> start() async {
@@ -133,8 +139,11 @@ class Pipeline extends ChangeNotifier {
       overlayStyle = _styleStore!.load();
       phoneSupported = await PlaybackCapture.supported();
       var missing = paths!.missing();
-      if (missing.isNotEmpty) {
-        await _copyBundled(paths!.modelsDir);
+      if (missing.isNotEmpty && await PlayPacks.available()) {
+        // Play install: the fast-follow packs may still be downloading. Wait here with a progress
+        // screen; on failure the screen offers 「重試」 (= start() again).
+        if (!await _downloadPacks()) return;
+        paths = await ModelPaths.resolve();
         missing = paths!.missing();
       }
       if (missing.isNotEmpty) {
