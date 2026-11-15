@@ -17,10 +17,12 @@ from tkinter import font as tkfont
 from ..i18n import set_ui_lang, t, ui_lang
 from .icon import apply_icon, icon_path, set_app_id
 from ..langs import from_label as lang_from_label, label as lang_label, labels as lang_labels
-from .core import (GUI_SEND_MODES, BOTH_MODE, SPEAK_MARK, both_settings, SpeakQueueSink, start_button, cpu_ram_gb, choice_label, choice_labels, choice_value, SPEAK_HINT_CABLE, meeting_cable, quick_settings, SameLanguageError, SEND_MODES, send_mode_notice_key, restart_needed, send_gate_line, speak_route, speak_start_view, tour_on_start, USAGE_CHOICES, usage_answer, usage_should_ask, tour_text, ALPHA_STEP, FONT_MAX, FONT_MIN, ROWS_MAX, ROWS_MIN, HISTORY_LINES, PRESETS, QUALITIES, SOURCES, TARGETS, QueueDraftRenderer,
+from ..i18n import SILENT_CLEAR
+from .core import scene_of as scene_mode_name
+from .core import (SpeakerColors, SPK_AVATAR_FG, speaker_initial, speaker_text, SCENES, WATCH_MODE, scene_mode, scene_runs, strip_silent_hint, GUI_SEND_MODES, BOTH_MODE, SPEAK_MARK, SpeakQueueSink, start_button, cpu_ram_gb, choice_label, choice_labels, choice_value, SPEAK_HINT_CABLE, meeting_cable, quick_settings, SameLanguageError, SEND_MODES, send_mode_notice_key, restart_needed, send_gate_line, speak_route, speak_start_view, tour_on_start, USAGE_CHOICES, usage_answer, usage_should_ask, tour_text, ALPHA_STEP, FONT_MAX, FONT_MIN, ROWS_MAX, ROWS_MIN, HISTORY_LINES, PRESETS, QUALITIES, SOURCES, TARGETS, QueueDraftRenderer,
                    QueueSink, SubtitleState, engine_from_label, engine_labels, clamp_font, clamp_rows, follow_newest, load_settings,
                    combo_width, doctor_lang, is_downloaded, label_for_model, model_from_label, model_labels, rows_after_drag, run_download, run_setup_check, missing_start_model, StartDownload,
-                   save_settings, settings_to_argv, voice_outputs, clamp_alpha, run_pack_download, gui_error_text, load_status_text)
+                   save_settings, settings_to_argv, voice_outputs, listen_outputs, clamp_alpha, run_pack_download, gui_error_text, load_status_text)
 from . import autoupdate, pack_on_demand
 from .. import __version__, userdirs
 
@@ -282,9 +284,15 @@ class Overlay:
         t.configure(state="normal")
         t.delete("1.0", "end")
         rows = state.history() or [("", text, d) for text, d in self.app.placeholder()]  # "Listening..."
+        pfx = getattr(self.app, "speaker_prefix", None)  # the CLI Bar host has none: no labels, as before
         for i, (src, text, is_draft) in enumerate(rows):
             if show_src and src:
                 t.insert("end", src + "\n", "src")
+            p = pfx(i) if pfx is not None and state.history() else None
+            if p:  # 0.3.8: colored "● Speaker 2: " in front of the same line (no extra row, no extra height)
+                tag = "spkc" + p[1]
+                t.tag_configure(tag, foreground=p[1], font=self.font)
+                t.insert("end", p[0], tag)
             t.insert("end", text + ("\n" if i < len(rows) - 1 else ""), "draft" if is_draft else "final")
         t.configure(state="disabled")
         if follow:
@@ -379,6 +387,9 @@ class App:
         self.q: queue.Queue = queue.Queue()
         self.state = SubtitleState(HISTORY_LINES)
         self.listening = False  # a session is running (Start pressed, worker not yet stopped)
+        self.spk_clusterer = None  # per-session SpeakerClusterer (reset on Start only)
+        self._slow_after = None  # Tk after() id of the 10 s slow-load line
+        self._slow_shown = False
         self.load_t0: float | None = None  # #332: monotonic time of Start while models load, else None
         self.load_shown = 0
         self.stop_ev = threading.Event()
@@ -400,6 +411,12 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
         self._tr: list[tuple[object, str, str]] = []  # (widget, option, i18n key) re-labelled on language switch
         self.status_key: str | None = "gui_ready"
+        from ..speakers import SpeakerBook
+
+        self.spk_colors = SpeakerColors()  # 0.3.8: avatar colors per speaker, first-seen order
+        self.spk = None  # 0.3.8: async speaker-ID labeler of this session (None = unavailable)
+        self._spk_tags_bound: set[str] = set()  # speaker-label tags already bound on self.log_text
+        self.spk_book = SpeakerBook()  # session-only names
         self.quick_mode: str | None = None  # #294: first-screen button that started this session
         self.run_source = "system"
         self.speak_hint: str | None = None  # #710: speak_route() result for this session
@@ -430,6 +447,27 @@ class App:
     def set_status(self, key: str):
         self.status_key = key
         self.v_status.set(t(key))
+
+    def _slow_clear(self):
+        """Cancel the slow-load timer and forget the line (ready, Stop, error, new Start)."""
+        if self._slow_after is not None:
+            try:
+                self.root.after_cancel(self._slow_after)
+            except Exception:  # noqa: BLE001
+                pass
+        self._slow_after, self._slow_shown = None, False
+
+    def _slow_load_due(self):
+        """10 s after Start and still loading: add the friendly line under the loading status."""
+        self._slow_after = None
+        if self.load_t0 is None or self.errored:
+            return
+        from .core import slow_load_line
+
+        line = slow_load_line(time.monotonic() - self.load_t0)
+        if line:
+            self._slow_shown = True
+            self._status_text(f"{self.v_status.get()}\n{line}")
 
     def _status_text(self, text: str):
         self.status_key = None
@@ -790,6 +828,16 @@ class App:
         """#1028: bottom bar. Row 1: mic toggle, floating subtitles. Row 2: settings, status dot, freeze subtitles,
         the big Start / Stop at the right."""
         b = self.bar
+        scene_row = ttk.Frame(b)  # 0.3.8: 情境 - what the one Start starts; fixed while a session runs
+        scene_row.pack(fill="x", pady=(0, 6))
+        self._tx(ttk.Label(scene_row), "gui_scene").pack(side="left", padx=(0, 6))
+        self.v_scene = tk.StringVar(value=scene_mode_name(self.settings))
+        self.scene_btns = []
+        for sc in SCENES:
+            rb = ttk.Radiobutton(scene_row, variable=self.v_scene, value=sc, style="Toolbutton",
+                                 command=self._scene_changed)
+            self._tx(rb, "gui_scene_" + sc).pack(side="left", padx=(0, 4))
+            self.scene_btns.append(rb)
         row1 = ttk.Frame(b)
         row1.pack(fill="x")
         self.v_mic = tk.BooleanVar(value=True)
@@ -797,6 +845,10 @@ class App:
         self.btn_mic.pack(side="left")
         self._tx(ttk.Checkbutton(row1, variable=self.v_bar, style="Toolbutton", command=self._bar_toggled),
                  "gui_overlay_btn").pack(side="left", padx=(6, 0))
+        # 0.3.8: speaker labels (both scenes); on the toggles row, not the scene row, so the window stays <= 560 px (#1028)
+        self.v_spk = tk.BooleanVar(value=bool(self.settings.get("speaker_id")))
+        self._tx(ttk.Checkbutton(row1, variable=self.v_spk, command=self._spk_toggled), "gui_spk").pack(
+            side="left", padx=(10, 0))
         # #1020: "Freeze subtitles" only freezes this list and the floating bar (translation keeps running)
         row2 = ttk.Frame(b)
         row2.pack(fill="x", pady=(8, 0))
@@ -808,11 +860,79 @@ class App:
         self.set_dot("idle")
         self.btn_pause = ttk.Button(row2, text=t("gui_pause"), command=self.toggle_pause)
         self.btn_pause.pack(side="left")
-        self.btn = self.both_btn = ttk.Button(row2, text=t("gui_start"), command=lambda: self.toggle(BOTH_MODE),
+        self.btn = self.both_btn = ttk.Button(row2, text=t("gui_start"), command=lambda: self.toggle(None),
                                               style="Start.Accent.TButton", width=14)
         self.btn.pack(side="right")
         self._mic_label()
         self._sync_quick()
+
+    def _scene_changed(self):
+        """0.3.8: remember the scene (applies at the next Start; the buttons are disabled while running)."""
+        self.settings["scene"] = self.v_scene.get()
+        save_settings(self.settings)
+
+    def _spk_toggled(self):
+        """0.3.8: 標示說話者. On + pack missing -> ask, download in a worker thread (Tk never blocks); the labels start
+        with the next Start. Declined / failed -> back to off."""
+        from ..models import models_dir
+        from . import speaker_pack
+
+        def start():
+            self.downloading = "speaker"
+            self.start_dl = StartDownload("speaker")
+            self.v_dl_pct.set(0)
+            self.dl_bar.pack(anchor="w", pady=(4, 0))
+            self._status_text(t("gui_dl_running", model="speaker"))
+            self._spk_fail_reason = ""
+            threading.Thread(target=speaker_pack.run_download, args=(self.q.put, models_dir(), None), daemon=True).start()
+
+        want = self.v_spk.get()
+        if want and self.downloading:  # another download is running: not now
+            self.v_spk.set(False)
+            return
+        try:
+            res = speaker_pack.on_toggle(want, models_dir(), lambda txt, ok, no: messagebox.askyesno(
+                t("gui_spk"), txt, parent=self.root), start, ui_lang())
+        except Exception:  # noqa: BLE001
+            _diag.swallowed(__name__)
+            res = "off"
+        if res == "downloading":
+            return  # saved when the download succeeded (_spk_done)
+        self.v_spk.set(res == "on")
+        self.settings["speaker_id"] = res == "on"
+        save_settings(self.settings)
+        self._spk_sync()
+
+    def _spk_done(self, rc: int):
+        from ..models import models_dir
+        from . import speaker_pack
+
+        self.start_dl = None
+        self.dl_bar.pack_forget()
+        self.downloading = None
+        self._sync_quick()
+        ok = rc == 0 and not any(speaker_pack.missing(models_dir()))
+        import_failed = ok and not speaker_pack.import_ok(models_dir())  # installed but sherpa_onnx will not load
+        ok = ok and not import_failed
+        wanted = bool(self.v_spk.get())  # the user may have switched it off while the download was running
+        if ok and not wanted:
+            self._status_text(t("gui_dl_ok", model="speaker"))  # pack stays installed; nothing is enabled / attached
+            return
+        self.v_spk.set(ok)
+        self.settings["speaker_id"] = ok
+        save_settings(self.settings)
+        if ok:
+            self._spk_sync()  # live: the running session starts labelling now
+            self._status_text(t("gui_dl_ok", model="speaker"))
+            return
+        self._status_text("")
+        if not wanted:
+            return
+        msg = t("gui_spk_import" if import_failed else "gui_spk_fail")
+        reason = getattr(self, "_spk_fail_reason", "")
+        if reason and not import_failed:
+            msg = f"{msg}\n\n{reason}"
+        messagebox.showwarning(t("gui_spk"), msg, parent=self.root)
 
     def _mic_label(self):
         self.btn_mic.configure(text=t("gui_mic_on" if self.v_mic.get() else "gui_mic_off"))
@@ -829,7 +949,7 @@ class App:
         else:
             self.mic_ev.set()
         self._mic_label()
-        if self.listening and self.load_t0 is None:
+        if self.listening and self.load_t0 is None and self.quick_mode != WATCH_MODE:
             cur, note = self.v_notice.get(), t("gui_mic_off_note")
             if self.mic_off:
                 if note not in cur:  # keep an existing notice (no CABLE ...), add the mic line under it
@@ -859,7 +979,7 @@ class App:
 
     def _bar_start(self):
         """#1001: the bar's Start = the one Start (listen + speak together); Stop while running."""
-        self.toggle(BOTH_MODE)
+        self.toggle(None)
 
     def _pair_changed(self):
         """#981: same language on both sides is said at once, under the pickers, before Start is pressed."""
@@ -874,8 +994,45 @@ class App:
         self.same_lang = False
         self._lang_check_ui()
         self.v_pair.set("")
+        if getattr(self, "ru_notice", None) is not None:  # Russian picked: offer the voice now, not only at Start
+            self.root.after(200, self._ru_voice_check)
 
     same_lang = False
+
+    def _ru_voice_check(self):
+        """Either picker just became Russian: when the Russian voice (Piper + engine) is missing, ask for the one-click
+        download at once. "Not now" leaves a lasting notice with a [Download] button (it never looks broken)."""
+        from ..models import models_dir
+        from . import voice_install
+
+        try:
+            ru = voice_install.ru_selected(self.v_target.get(), lang_from_label(self.v_lang.get()))
+            missing = ru and not self.same_lang and voice_install.piper_missing(models_dir())
+        except Exception:  # noqa: BLE001  # an unreadable path must not break the pickers
+            return
+        if not missing:
+            self.ru_notice.grid_remove()
+            return
+        if self.downloading or self.listening:
+            return
+        self._ru_voice_ask()
+
+    def _ru_voice_ask(self):
+        """The question + download for the Russian voice (no Start follows it); the notice stays when declined."""
+        from ..models import models_dir
+        from . import voice_install
+
+        if self.downloading:
+            return
+        if not voice_install.piper_missing(models_dir()):
+            self.ru_notice.grid_remove()
+            return
+        if not self._offer_voice({"voice": True, "target": "ru"}, None, resume=False):
+            self.ru_notice_lbl.configure(text=voice_install.notice_text(ui_lang()))
+            self.ru_notice_btn.configure(text=voice_install.notice_button(ui_lang()))
+            self.ru_notice.grid()
+        else:
+            self.ru_notice.grid_remove()
 
     def _lang_check_ui(self):
         """#982: My language == Other side language: inline error and Start disabled (home button and bar button)."""
@@ -1001,6 +1158,14 @@ class App:
         shown = s["voice_device"] if s["voice_device"] in outs or not outs else ""  # #448: unplugged -> default
         self.v_voice_dev = tk.StringVar(value=shown or self.voice_default)
         ttk.Combobox(f, textvariable=self.v_voice_dev, values=[self.voice_default] + outs,
+                     state="readonly", width=18).grid(row=r, column=c + 1, columnspan=2, sticky="we", pady=1, padx=(6, 0))
+        self._label(12, "gui_listen_device")  # #1070: which output the other side is heard on (Advanced)
+        r, c = self._cell(12)
+        self.listen_default = t("gui_listen_default")
+        louts = listen_outputs()
+        lshown = s.get("listen_device", "") if s.get("listen_device", "") in louts else ""
+        self.v_listen_dev = tk.StringVar(value=lshown or self.listen_default)
+        ttk.Combobox(f, textvariable=self.v_listen_dev, values=[self.listen_default] + louts,
                      state="readonly", width=18).grid(row=r, column=c + 1, columnspan=2, sticky="we", pady=1, padx=(6, 0))
         # #738: subtitle lines / font size, UI language, dark theme, updates, report, about live in the menu bar
         self.v_lines = self._num_var(ROWS_MIN, ROWS_MAX, s["overlay_lines"], lambda n: self.overlay.set_rows(n))
@@ -1300,6 +1465,13 @@ class App:
         # #982: the inline error (v_pair only carries the state text)
         self.lang_err = ttk.Label(q, foreground="#c0392b", wraplength=MAIN_W - 40, justify="left")
         self.lang_err.grid(row=1, column=0, columnspan=4, sticky="w")
+        self.ru_notice = ttk.Frame(q)  # lasting "Russian voice not downloaded" line + [Download]
+        self.ru_notice_lbl = ttk.Label(self.ru_notice, foreground="#b9770e")
+        self.ru_notice_lbl.pack(side="left")
+        self.ru_notice_btn = ttk.Button(self.ru_notice, command=self._ru_voice_ask)
+        self.ru_notice_btn.pack(side="left", padx=(8, 0))
+        self.ru_notice.grid(row=2, column=0, columnspan=4, sticky="w")
+        self.ru_notice.grid_remove()
         for v in (self.v_lang, self.v_target):
             v.trace_add("write", lambda *_: self._pair_changed())
         self._pair_changed()
@@ -1315,8 +1487,15 @@ class App:
             return "busy"
         return "running" if self.listening else "idle"
 
+    def _sync_scene(self):
+        """0.3.8: the scene can only change while stopped (applies at the next Start)."""
+        st = "normal" if self._quick_phase() == "idle" else "disabled"
+        for rb in getattr(self, "scene_btns", []):
+            rb.configure(state=st)
+
     def _sync_quick(self):
         """Label/enable the first-screen buttons for the current session state (#294)."""
+        self._sync_scene()
         if getattr(self, "lbl_restart", None) is not None:
             self._restart_check()  # #983: the notice goes away once the session has stopped
         if not hasattr(self, "both_btn"):
@@ -1360,6 +1539,8 @@ class App:
         if e.width != getattr(self, "_log_w", None):
             self._log_w = e.width
             self._chat_tags()
+            if getattr(self, "_log_shown", None) and self._log_shown[0]:
+                self.render_log()  # #1070: bubbles are wrapped to the new width
 
     def placeholder(self) -> list[tuple[str, bool]]:
         """What to show before the first subtitle of a session: the user must see that it is listening."""
@@ -1428,9 +1609,27 @@ class App:
             mine = text.startswith(SPEAK_MARK) or src.startswith(SPEAK_MARK)  # #1001: speak-leg lines are mine
             side = "me" if mine else "other"
             src, text = src.removeprefix(SPEAK_MARK), text.removeprefix(SPEAK_MARK)
-            tx.insert("end", t("gui_chat_me" if mine else "gui_chat_other") + "\n", f"{side}_head")
-            tx.insert("end", f" {text} ", (f"{side}_draft" if is_draft else f"{side}_final", f"row{i}"))
-            tx.insert("end", "\n", (f"{side}_base", f"row{i}"))
+            head = t("gui_chat_me" if mine else "gui_chat_other")
+            lab = None if mine else self._speaker_label(i)
+            if lab:  # 0.3.8: "[1] 說話者 1" (no 對方 word) - the name is a link: click to rename
+                raw, shown = lab
+                tag = f"spk:{raw}"
+                color = self.spk_colors.color(raw)  # first-seen order, stable for the session
+                av = f"spkav:{raw}"  # one tag per speaker, re-configured in place: no images, no widgets
+                tx.insert("end", f" {speaker_initial(self.spk_book, raw)} ", (f"{side}_head", av))
+                tx.insert("end", " ", f"{side}_head")
+                tx.insert("end", shown, (f"{side}_head", tag))
+                tx.insert("end", "\n", f"{side}_head")
+                tx.tag_configure(av, background=color, foreground=SPK_AVATAR_FG)
+                tx.tag_configure(tag, underline=True, foreground=color)
+                if tag not in self._spk_tags_bound:  # bind once per tag: every bind leaks a Tcl command
+                    self._spk_tags_bound.add(tag)
+                    tx.tag_bind(tag, "<Button-1>", lambda _e, r=raw: self._rename_speaker(r))
+                    tx.tag_bind(tag, "<Enter>", lambda _e: tx.configure(cursor="hand2"))
+                    tx.tag_bind(tag, "<Leave>", lambda _e: tx.configure(cursor=""))
+            else:
+                tx.insert("end", head + "\n", f"{side}_head")
+            self._insert_bubble(side, text, is_draft, i)
             if show_src and src and src != text:
                 tx.insert("end", src + "\n", (f"{side}_src", f"row{i}"))
         tx.configure(state="disabled")
@@ -1438,6 +1637,121 @@ class App:
             self._log_to_end()
         else:
             tx.yview(top)
+
+    def _speaker_label(self, row: int):
+        """0.3.8: (raw label, text to show) of history row `row`, or None (no speaker ID / not ready / mine)."""
+        who = self.state.history_who()
+        if self.spk is None or row >= len(who) or not who[row]:
+            return None
+        raw = self.spk.result(who[row])
+        raw = self.spk_book.resolve(raw) if raw else None
+        shown = speaker_text(self.spk_book, raw, lambda n: t("gui_speaker", n=n)) if raw else None
+        return (raw, shown) if shown else None
+
+    def speaker_prefix(self, row: int):
+        """Floating bar: (prefix text, color) of history row `row`, or None (labels off / not ready / mine)."""
+        from .core import speaker_prefix
+
+        lab = self._speaker_label(row)
+        if not lab:
+            return None
+        return speaker_prefix(self.spk_book, self.spk_colors, lab[0], lambda n: t("gui_speaker", n=n))
+
+    def _rename_speaker(self, raw: str):
+        """0.3.8: click on a speaker label: ask for a name; it applies to every past and future bubble of that speaker
+        in this session (SpeakerBook, never saved). An empty name goes back to "Speaker N"."""
+        from tkinter import simpledialog
+
+        cur = speaker_text(self.spk_book, raw, lambda n: t("gui_speaker", n=n)) or raw
+        name = simpledialog.askstring(t("gui_chat_other"), t("gui_speaker_rename", name=cur), initialvalue=cur,
+                                      parent=self.root)
+        if name is None:
+            return
+        self.spk_book.rename(raw, name)
+        self.render_log()
+        if self.overlay.visible:
+            self.overlay.render(self.state)  # the floating bar shows the new name at once
+
+    def _close_labeler(self):
+        """Stop the speaker-ID worker thread and let go of its model (Stop, restart, quit)."""
+        lab = self.spk  # kept: the finished bubbles still read their labels from it
+        if lab is not None:
+            try:
+                lab.close()
+            except Exception:  # noqa: BLE001
+                _diag.swallowed(__name__)
+
+    def _make_labeler(self, mdir):
+        """0.3.8 (worker thread): the async speaker-ID labeler for the listen leg, or None when sherpa-onnx / the
+        speaker model is missing - then the GUI shows no labels and behaves exactly as before."""
+        from . import speaker_pack
+
+        from ..speaker_embed import LiveSpeakers
+
+        lab = speaker_pack.make_labeler(self.settings, mdir, on_ready=lambda: self.q.put(("spk_ready",)),
+                                        clusterer=self.spk_clusterer)
+        self.spk = live = LiveSpeakers(lab)  # the pipeline reads it; the toggle can attach / detach mid-run
+        return live
+
+    def _spk_sync(self):
+        """0.3.8: the toggle applies live. ON while a session runs: build the labeler off the Tk thread and attach it
+        (new segments get labels from then on). OFF: detach and close it. Past bubbles keep what they have."""
+        from ..models import models_dir
+        from . import speaker_pack
+
+        live = self.spk
+        if live is None or live.closed or not hasattr(live, "set"):
+            return  # no running session: the next Start reads the setting
+        if not self.settings.get("speaker_id"):
+            live.set(None)
+            return
+        if live.get() is not None:
+            return
+        mdir, settings, clusterer = models_dir(), self.settings, self.spk_clusterer
+
+        def attach():
+            try:
+                lab = speaker_pack.make_labeler(settings, mdir, on_ready=lambda: self.q.put(("spk_ready",)),
+                                                clusterer=clusterer)
+            except Exception:  # noqa: BLE001
+                _diag.swallowed(__name__)
+                return
+            if lab is None:
+                return
+            if settings.get("speaker_id") and live.get() is None:
+                live.set(lab)
+            else:  # switched off again while the model was loading
+                lab.close()
+
+        threading.Thread(target=attach, daemon=True, name="tlwu-speaker-attach").start()
+
+    def _insert_bubble(self, side: str, text: str, is_draft: bool, row: int):
+        """#1070: a bubble hugs its text (max ~75 % of the window). Tk paints the margin area with the background of the
+        line's first character, so the text is wrapped here and every line starts with a plain spacer (no
+        background) that carries the margin; the background tag covers only the words."""
+        import tkinter.font as tkfont
+
+        from .core import wrap_bubble
+
+        tx = self.log_text
+        n = self.settings["log_font_size"]
+        width = tx.winfo_width()
+        width = width if width > 100 else 400
+        try:
+            fnt = tkfont.Font(family=FONT_FAMILY, size=n)
+            measure = fnt.measure
+        except Exception:  # noqa: BLE001
+            measure = lambda s: len(s) * n  # noqa: E731
+        lines = wrap_bubble(text, measure, max(60, int(width * 0.75) - 24))
+        top = max(measure(" " + ln + " ") for ln in lines)
+        margin = 10 if side == "other" else max(10, (width - 8 - 10 - top) // 4 * 4)
+        mtag = f"{side}_m{margin}"
+        tx.tag_configure(mtag, lmargin1=margin, lmargin2=margin, rmargin=0, justify="left")
+        fin = f"{side}_draft" if is_draft else f"{side}_final"
+        for ln in lines:
+            tx.insert("end", " ", (mtag, f"row{row}"))
+            tx.insert("end", f" {ln} ", (fin, f"row{row}"))
+            tx.insert("end", chr(10), (mtag, f"row{row}"))
 
     def _sync_bar(self):
         """#1042: the floating-subtitles button always shows whether the bar is really on screen."""
@@ -1526,7 +1840,7 @@ class App:
         threading.Thread(target=run_pack_download, args=(pack, self.q.put), daemon=True).start()
         return True
 
-    def _offer_voice(self, run: dict, mode: str = "speak") -> bool:
+    def _offer_voice(self, run: dict, mode: str = "speak", resume: bool = True) -> bool:
         """#967: True when this speak Start must not go on now: the Kokoro voice is missing and the question was
         answered "no" (speak runs subtitles only, as before) or the install is running (Start resumes in _pack_done)."""
         from ..models import models_dir
@@ -1539,17 +1853,24 @@ class App:
         except Exception:  # noqa: BLE001  # an unreadable path must not block Start
             return False
         lang = ui_lang()
-        if not messagebox.askyesno(voice_install.title_text(lang), voice_install.dialog_text(lang), parent=self.root):
+        ru = voice_install.is_ru(run)  # Russian: Piper voice + piper-tts into the TTS venv, no Kokoro
+        name = voice_install.pack_name(run)
+        if not messagebox.askyesno(voice_install.title_text(lang), voice_install.dialog_text(lang, ru), parent=self.root):
+            if ru and resume and getattr(self, "ru_notice", None) is not None:  # Start fallback: same lasting notice
+                self.ru_notice_lbl.configure(text=voice_install.notice_text(lang))
+                self.ru_notice_btn.configure(text=voice_install.notice_button(lang))
+                self.ru_notice.grid()
             return False  # "no": speak starts with subtitles only, the red line explains why there is no voice
-        self.downloading = voice_install.VOICE_PACK
+        self.downloading = name
         self.pack_retry = mode
-        self.start_dl = StartDownload(voice_install.VOICE_PACK)
+        self.pack_resume = resume  # False: asked from the language picker, nothing starts when the download ends
+        self.start_dl = StartDownload(name)
         self.v_dl_pct.set(0)
         self.dl_bar.pack(anchor="w", pady=(4, 0))
         self.btn.configure(state="disabled")
-        self._status_text(t("gui_dl_running", model=voice_install.VOICE_PACK))
+        self._status_text(t("gui_dl_running", model=name))
         self._sync_quick()
-        threading.Thread(target=run_voice_install, args=(self.q.put,), daemon=True).start()
+        threading.Thread(target=run_voice_install, args=(self.q.put,), kwargs={"ru": ru}, daemon=True).start()
         return True
 
     def _offer_cable(self, mode: str = "speak") -> bool:
@@ -1597,6 +1918,9 @@ class App:
         messagebox.showwarning(vbcable.title_text(lang), vbcable.fail_text(lang), parent=self.root)
 
     def _pack_done(self, pack: str, rc: int):
+        if pack == "speaker":
+            self._dl_event(("pack_done", pack, rc))
+            return self._spk_done(rc)
         self._dl_event(("pack_done", pack, rc))
         self.start_dl = None
         self.dl_bar.pack_forget()
@@ -1604,8 +1928,11 @@ class App:
         self.btn.configure(state="normal")
         self._status_text(t("gui_dl_ok" if rc == 0 else "gui_dl_fail", model=pack))  # #1042: error shows in the main window
         self._sync_quick()
-        if rc == 0:  # on without restarting the app
+        if getattr(self, "ru_notice", None) is not None:
+            self.root.after(100, self._ru_voice_check)  # hides the notice once the Russian voice is there
+        if rc == 0 and getattr(self, "pack_resume", True):  # on without restarting the app
             self.toggle(getattr(self, "pack_retry", None))
+        self.pack_resume = True
 
     def _cpu_ram(self):
         """#780: RAM (GB) for the "too heavy" model marks on a PC without a CUDA device, else None."""
@@ -1697,6 +2024,7 @@ class App:
                  model=model_from_label(self.v_model.get()), preset=self.v_preset.get(), glossary=self.v_gloss.get().strip(), save=self.v_save.get(),
                  save_path=self.v_save_path.get().strip(), show_src=self.var_show_src.get(),
                  live_draft=self.v_live.get(), source=self.v_source.get(), floating_bar=self.v_bar.get(),
+                 listen_device="" if self.v_listen_dev.get() == self.listen_default else self.v_listen_dev.get(),
                  voice=self.v_voice.get(), send_mode=self.v_send_mode.get(),
                  voice_device="" if self.v_voice_dev.get() == self.voice_default else self.v_voice_dev.get())
         save_settings(s)
@@ -1714,11 +2042,11 @@ class App:
         if self.settings["floating_bar"] and not self.overlay.visible:
             self.v_bar.set(True)  # #1042: the saved choice is shown again at Start (Stop/launch left the button off)
         self.collect()
-        mode = mode or BOTH_MODE
+        mode = mode or scene_mode(self.settings)  # 0.3.8: the 情境 row decides what the one Start starts
         speak_run = None
         try:
-            if mode == BOTH_MODE:  # #1001: listen + speak in one session
-                run, speak_run = both_settings(self.settings)
+            if mode in (BOTH_MODE, WATCH_MODE):  # #1001: listen + speak; 0.3.8: video = listen only
+                _m, run, speak_run = scene_runs(dict(self.settings, scene="video" if mode == WATCH_MODE else "meeting"))
             else:
                 run = quick_settings(self.settings, mode)
         except SameLanguageError as e:  # #981: same language on both sides: say so, no run starts
@@ -1735,6 +2063,7 @@ class App:
         if self._offer_pack(run, mode) or (speak_run is not None and self._offer_pack(speak_run, mode)):  # #673
             return
         self.quick_mode, self.run_source = mode, run.get("source")
+        self._sync_scene()
         self._last_mode = mode or "listen"  # the finished rows keep this mode after Stop (#677)
         self.speak_hint = speak_route(voice_run, meeting_cable()) if speaking else None  # #710
         self.gate = None
@@ -1743,9 +2072,21 @@ class App:
 
             self.gate = SendGate(lambda _t: None, time.monotonic, mode=run.get("send_mode", "confirm"))
         self.state = SubtitleState(HISTORY_LINES)
+        from ..speakers import SpeakerBook
+
+        self._close_labeler()  # the previous session's worker thread and model
+        from ..speakers import SpeakerClusterer
+
+        self.spk, self.spk_book = None, SpeakerBook()  # new session: new speakers, new names
+        self.spk_clusterer = SpeakerClusterer()  # ONE per session: off -> on keeps numbering, names and colors
+        self.spk_colors = SpeakerColors()
         self.set_paused(False)
         self.stop_ev = threading.Event()
         self.load_t0 = time.monotonic()  # #332: Stop stays disabled ("Loading... N s") until the models are ready
+        self._slow_clear()
+        from .core import SLOW_LOAD_SECS
+
+        self._slow_after = self.root.after(int(SLOW_LOAD_SECS * 1000), self._slow_load_due)
         self.load_shown = 0
         self.btn.configure(text=t("gui_loading", s=0), state="disabled")
         self.set_status("gui_starting")
@@ -1754,7 +2095,7 @@ class App:
         if mode == BOTH_MODE:  # #1001: the panel opens only for the "no CABLE" line, which says listening still runs
             notice_key, show_panel = ("gui_both_no_voice", True) if notice_key else ("", False)
         self.v_notice.set(t(notice_key) if notice_key else "")
-        if self.mic_off:  # #1028: the mic toggle was left off; keep an existing notice (no CABLE) above it
+        if self.mic_off and mode != WATCH_MODE:  # #1028: the mic toggle was left off (no mic in 看影片); keep an existing notice (no CABLE) above it
             self.v_notice.set(t("gui_mic_off_note") if not notice_key else f"{t(notice_key)}\n{t('gui_mic_off_note')}")
         if show_panel:
             self._show_panel()
@@ -1824,10 +2165,14 @@ class App:
                     return None
                 return DraftEngine(asr, translator, QueueDraftRenderer(q), lambda: segmenter.live, tgt)
 
-            run_session(a, sink=(sink_cls or QueueSink)(q), draft_factory=draft_factory, stop=stop,
+            sink = (sink_cls or QueueSink)(q)
+            if sink_cls is not None:
+                sink.variant = "cn" if s.get("mine") == "zh-cn" else "tw"  # #1070
+            run_session(a, sink=sink, draft_factory=draft_factory, stop=stop,
                         status=lambda m: q.put(("status", m)),
                         notice=lambda m: q.put(("notice", m)),
-                        cpu_line=lambda ms: q.put(("cpu_line", ms)))
+                        cpu_line=lambda ms: q.put(("cpu_line", ms)),
+                        labeler_factory=self._make_labeler if sink_cls is None and s.get("source") == "system" else None)
         except Exception as e:  # noqa: BLE001
             print(f"tlwu: {type(e).__name__}: {e}", file=sys.stderr, flush=True)  # raw text for the log
             q.put(("error", gui_error_text(e)))  # #885: localized, no CLI flags
@@ -1845,11 +2190,18 @@ class App:
                 ev = self.q.get_nowait()
                 kind = ev[0]
                 if kind == "status":
-                    self._status_text(load_status_text(ev[1]))  # #1020: in the UI language
                     from ..cli import READY_STATUS  # already imported by the worker; not at GUI start (#332)
+
+                    st = load_status_text(ev[1])  # #1020: in the UI language
+                    if self._slow_shown and self.load_t0 is not None and not ev[1].startswith(READY_STATUS):
+                        from .core import slow_load_line
+
+                        st = f"{st}\n{slow_load_line(float('inf'))}"  # still loading: keep the slow line
+                    self._status_text(st)
 
                     if ev[1].startswith(READY_STATUS) and self.load_t0 is not None:
                         self.load_t0 = None
+                        self._slow_clear()  # ready: the slow-load line is gone for good
                         self.btn.configure(text=t("gui_stop"), state="normal")
                         self.set_dot("on")
                         ready = "gui_ready_speak" if self.run_source == "mic" else "gui_ready_listen"
@@ -1858,16 +2210,21 @@ class App:
                         text = t(ready)
                         if self.quick_mode == BOTH_MODE:  # #1001: both legs; keep the #710 CABLE hint after it
                             text = t("gui_ready_both") + (f" | {text}" if ready == SPEAK_HINT_CABLE else "")
-                        loaded = load_status_text(ev[1])  # #1020: "Listening - loaded in N s (...)" localized
-                        self._status_text(text if ev[1] == READY_STATUS else text + "\n" + loaded)  # #294
+                        import logging
+
+                        logging.getLogger("tlwu.gui").info("%s", load_status_text(ev[1]))  # breakdown: log only
+                        self._status_text(text)  # #294
                         self._sync_quick()
                 elif kind == "cpu_line":  # #780: "CPU mode - MT n ms per line" once running
                     from .core import cpu_mode_line
 
                     if self.load_t0 is None and not self.errored:
                         self._status_text(cpu_mode_line("cpu", ev[1]) or "")
+                elif kind == "notice" and ev[1] == SILENT_CLEAR:  # listened sound is back
+                    self.v_notice.set(strip_silent_hint(self.v_notice.get()))
                 elif kind == "notice":
-                    self.v_notice.set(ev[1])
+                    if ev[1] not in self.v_notice.get():  # the repeated silent hint must not clobber other lines
+                        self.v_notice.set(ev[1])
                     if self.speak_hint == SPEAK_HINT_CABLE:  # #710: e.g. the meeting voice turned itself off
                         self._show_panel()
                 elif kind == "pack_line":
@@ -1875,6 +2232,8 @@ class App:
                     self._status_text(ev[1])
                 elif kind == "cable_done":
                     self._cable_done(ev[1])
+                elif kind == "pack_fail_reason":
+                    self._spk_fail_reason = ev[2]
                 elif kind == "pack_done":
                     self._pack_done(ev[1], ev[2])
                 elif kind == "dl_line":
@@ -1902,6 +2261,8 @@ class App:
                         self._gate_tick()
                         self.gate = None
                     self.load_t0 = None
+                    self._slow_clear()
+                    self._close_labeler()  # Stop / #983 restart: the worker thread exits, the model is released
                     self.btn.configure(text=t("gui_start"), state="normal")
                     if not self.errored:
                         self.set_status("gui_stopped")
@@ -1915,8 +2276,12 @@ class App:
                         self.overlay.hide()
                     self._sync_bar()
                     self.render_log()  # drops a leftover "Listening..." placeholder
+                elif kind == "spk_ready":  # 0.3.8: a speaker label is ready: redraw the bubbles
+                    changed = True
                 else:
                     changed |= self.state.apply(ev)
+                    if ev[0] in ("source", "draft", "final") and self.v_notice.get():  # other side is heard: hint is stale
+                        self.v_notice.set(strip_silent_hint(self.v_notice.get()))
                     if ev[0] == "final" and usage_should_ask(self.settings) and getattr(self, "usage_win", None) is None:
                         self.root.after(1500, self._maybe_ask_usage)  # #680: once, after the first subtitle
         except queue.Empty:
@@ -2020,6 +2385,7 @@ class App:
             return
         self.closing = True
         self.stop_ev.set()
+        self._close_labeler()
         try:
             self.collect()
         except Exception:  # noqa: BLE001

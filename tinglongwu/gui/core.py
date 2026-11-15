@@ -28,11 +28,14 @@ DEFAULTS = {
     "source": "system", "preset": "meeting", "overlay_lines": 3, "theme": "dark",
     "floating_bar": False, "log_font_size": 14, "quality": "auto",
     "advanced_open": False,  # #399: the engine dropdown lives under a collapsed Advanced section
+    "listen_device": "",  # #1070: "" = listen to every output (not our cable); else one output name (Advanced)
     "voice": False, "voice_device": "",  # #330: speak each translated line on a separate output (off by default)
     "overlay_alpha": 0.82,  # #333: subtitle bar opacity (right-click > Opacity), kept across restarts
     "tour_seen": False,  # #314: the first-launch "3 steps" overlay was closed with "Got it"
     "usage_asked": False,  # #680: the one-time "what do you mainly use it for?" question was answered or skipped
     "usage_use": "",  # #680: the answer (one of USAGE_CHOICES, "" = none); local only, never sent anywhere
+    "scene": "meeting",  # 0.3.8: the 情境 row: "meeting" (listen + speak) or "video" (listen only); last choice kept
+    "speaker_id": False,  # 0.3.8: 標示說話者; off = sherpa-onnx and the speaker model are never loaded
     "send_mode": "auto",  # #834/#1052: how a speak line is sent (auto = straight away, confirm = show me first); owner default: auto
 }
 SEND_MODES = ("confirm", "countdown", "auto")  # same choices as reverse.sendmode.MODES (the CLI keeps all three)
@@ -58,7 +61,7 @@ def send_mode_notice_key(mode: str) -> str | None:
     return "gui_send_mode_notice" if mode in ("countdown", "auto") else None
 # #983: settings the running pipeline reads only when it starts; changing one during a run needs a restart
 START_TIME_SETTINGS = ("lang", "target", "engine", "quality", "model", "preset", "glossary", "source", "voice",
-                       "voice_device", "send_mode")
+                       "voice_device", "send_mode", "listen_device")
 
 
 def restart_needed(at_start: dict, now: dict) -> list[str]:
@@ -216,8 +219,38 @@ def both_settings(s: dict) -> tuple[dict, dict]:
     Raises SameLanguageError when both languages are the same."""
     session_route("two-way", s.get("target"), s.get("lang"))  # raises before any run is built
     listen, speak = quick_settings(s, "listen"), quick_settings(s, "speak")
-    speak.update(live_draft=False, save=False)
+    speak.update(live_draft=False, save=False, mine=s.get("target"))  # mine: script of my own words (#1070)
     return listen, speak
+
+
+WATCH_MODE = "watch"  # 0.3.8: scene "video": listen only (floating subtitles); no mic, no speech, nothing to CABLE
+SCENES = ("meeting", "video")
+
+
+def scene_of(s: dict) -> str:
+    """The saved scene, "meeting" when missing or unknown."""
+    return s.get("scene") if s.get("scene") in SCENES else "meeting"
+
+
+def scene_mode(s: dict) -> str:
+    """Which session the one Start runs: meeting = BOTH_MODE (listen + speak), video = WATCH_MODE (listen only)."""
+    return WATCH_MODE if scene_of(s) == "video" else BOTH_MODE
+
+
+def watch_settings(s: dict) -> dict:
+    """0.3.8 video scene: the listen leg only. The voice output (#330) is forced off too, so nothing is spoken or
+    sent to any output; the mic leg is simply not built. `s` is not changed."""
+    run = quick_settings(s, "listen")
+    run["voice"] = False
+    return run
+
+
+def scene_runs(s: dict) -> tuple[str, dict, dict | None]:
+    """(mode, listen run, speak run or None) for the saved scene; raises SameLanguageError like both_settings."""
+    if scene_mode(s) == WATCH_MODE:
+        return WATCH_MODE, watch_settings(s), None
+    listen, speak = both_settings(s)
+    return BOTH_MODE, listen, speak
 
 
 def start_button(phase: str, active: str | None = None) -> tuple[str, bool]:
@@ -225,7 +258,7 @@ def start_button(phase: str, active: str | None = None) -> tuple[str, bool]:
     if phase == "loading":
         return "gui_loading", False
     if phase == "running":
-        return ("gui_stop", True) if active == BOTH_MODE else ("gui_quick_both", False)
+        return ("gui_stop", True) if active in (BOTH_MODE, WATCH_MODE) else ("gui_quick_both", False)
     return "gui_quick_both", phase == "idle"
 
 
@@ -784,16 +817,18 @@ def run_pack_download(pack: str, put, mdir=None, popen=None, bundled: bool | Non
     return rc
 
 
-def voice_install_cmd(mdir=None, bundled: bool | None = None) -> list[str]:
-    """#967: same child as download_cmd, but `--talk` (Kokoro venv + model + smoke, the CLI's step) instead of `--whisper`."""
+def voice_install_cmd(mdir=None, bundled: bool | None = None, ru: bool = False) -> list[str]:
+    """#967: same child as download_cmd, but `--talk` (Kokoro venv + model + smoke, the CLI's step) instead of `--whisper`.
+    ru: the Russian voice instead: `--piper-engine --piper-ru` (piper-tts into the TTS venv + the dmitri voice files)."""
     cmd = download_cmd("small", mdir, bundled)
     i = cmd.index("--whisper")
-    return [*cmd[:i], "--talk", *cmd[i + 2:]]
+    return [*cmd[:i], *(["--piper-engine", "--piper-ru"] if ru else ["--talk"]), *cmd[i + 2:]]
 
 
-def run_voice_install(put, mdir=None, popen=None, bundled: bool | None = None) -> int:
-    """#967: worker thread: run the voice install child; same events as run_pack_download (pack "voice")."""
-    return run_pack_download("voice", put, mdir, popen, bundled, cmd=voice_install_cmd(mdir, bundled))
+def run_voice_install(put, mdir=None, popen=None, bundled: bool | None = None, ru: bool = False) -> int:
+    """#967: worker thread: run the voice install child; same events as run_pack_download (pack "voice" / "voice-ru")."""
+    return run_pack_download("voice-ru" if ru else "voice", put, mdir, popen, bundled,
+                             cmd=voice_install_cmd(mdir, bundled, ru))
 
 
 def settings_to_argv(s: dict, outputs: list[str] | None = None, notice=None) -> list[str]:
@@ -813,6 +848,8 @@ def settings_to_argv(s: dict, outputs: list[str] | None = None, notice=None) -> 
         argv += ["--quality", quality]
     if s.get("source") == "mic":
         argv += ["--mic"]
+    elif s.get("listen_device"):  # #1070: an output picked in Advanced; default = every output but our cable
+        argv += ["--capture-device", s["listen_device"]]
     if s.get("glossary"):
         argv += ["--glossary", s["glossary"]]
     if s.get("save"):
@@ -846,6 +883,20 @@ def voice_outputs(names=None) -> list[str]:
     return [n for n in names if n and voice_output_problem(n, None) is None]
 
 
+def listen_outputs(names=None) -> list[str]:
+    """#1070: outputs the listen leg may be pointed at (Advanced): every real output, never our own cable / sink."""
+    from ..capture.wasapi import listen_names
+
+    if names is None:
+        try:
+            import soundcard as sc
+
+            names = [sp.name for sp in sc.all_speakers()]
+        except Exception:  # noqa: BLE001 - no audio stack: only "all outputs" is offered
+            names = []
+    return listen_names(list(names))
+
+
 class QueueSink(Sink):
     """Final lines -> queue (runs on the worker thread; never touches tkinter)."""
 
@@ -856,7 +907,49 @@ class QueueSink(Sink):
         self.q.put(("source", original))  # shown dim until its "final" arrives (#53)
 
     def write(self, r: Result) -> None:
-        self.q.put(("final", r.original, r.target if r.src != r.tgt and r.target else r.original))
+        from ..reverse.echoguard import shared
+
+        if shared().check(r.original, r.target if r.src != r.tgt else ""):  # #1070: our own voice coming back
+            return
+        ev = ("final", r.original, r.target if r.src != r.tgt and r.target else r.original)
+        self.q.put(ev + (r.speaker,) if r.speaker else ev)  # 0.3.8: the async speaker token rides along
+
+
+def wrap_bubble(text: str, measure, max_px: int) -> list[str]:
+    """#1070: break `text` into lines that are at most max_px wide (measure(str) -> pixels): at spaces, and between
+    CJK characters; a single over-long word is split by characters. Always at least one line."""
+    import re
+
+    tokens = re.findall(r"[぀-ヿ㐀-鿿가-힯]|[^\s぀-ヿ㐀-鿿가-힯]+|\s+", text.replace(chr(10), " "))
+    lines: list[str] = []
+    cur = ""
+    for tok in tokens:
+        if tok.isspace():
+            cur += " " if cur else ""
+            continue
+        if cur and measure(cur + tok) > max_px:
+            lines.append(cur.rstrip())
+            cur = ""
+        while measure(tok) > max_px and len(tok) > 1:  # one word wider than the bubble
+            k = len(tok) - 1
+            while k > 1 and measure(tok[:k]) > max_px:
+                k -= 1
+            lines.append(tok[:k])
+            tok = tok[k:]
+        cur += tok
+    if cur.strip():
+        lines.append(cur.rstrip())
+    return lines or [""]
+
+
+def _zh_display(text: str, variant: str) -> str:
+    """#1070: Whisper writes Chinese in Simplified; show it in the user's script. Falls back to the text as is."""
+    try:
+        from ..translate import zh_convert
+
+        return zh_convert(text, variant)
+    except Exception:  # noqa: BLE001 - opencc missing: show what Whisper wrote
+        return text
 
 
 class SpeakQueueSink(QueueSink):
@@ -866,9 +959,19 @@ class SpeakQueueSink(QueueSink):
     def write_source(self, src: str, original: str, speaker: str | None = None) -> None:
         pass
 
+    variant = "tw"  # #1070: the script my own words are shown in (zh-tw -> Traditional)
+
     def write(self, r: Result) -> None:
         out = r.target if r.src != r.tgt and r.target else r.original
-        self.q.put(("final_side", SPEAK_MARK + r.original, SPEAK_MARK + out))
+        original = r.original
+        if lang_base(r.src) == "zh":
+            original = _zh_display(original, self.variant)
+            if r.src == r.tgt or not r.target:
+                out = original
+        from ..reverse.echoguard import shared
+
+        shared().note(r.original)  # #1070: the source of what we send, for the listen-leg echo guard
+        self.q.put(("final_side", SPEAK_MARK + original, SPEAK_MARK + out))
 
 
 class QueueDraftRenderer(DraftRenderer):
@@ -889,6 +992,29 @@ class QueueDraftRenderer(DraftRenderer):
             self.q.put(("draft", "", src))
 
 
+def strip_silent_hint(text: str) -> str:
+    """#1070/0.3.8: drop the "10 s without the other side's sound" line from a notice (any UI language); other
+    notice lines stay. Called when listen-side audio or an other-side bubble arrives."""
+    from ..i18n import MESSAGES
+
+    heads = {m["listen_silent"].split("{names}")[0] for m in MESSAGES.values() if "listen_silent" in m}
+    keep = [ln for ln in (text or "").split(chr(10)) if not any(ln.startswith(h) for h in heads)]
+    return chr(10).join(keep).strip()
+
+
+def speaker_text(book, label, fmt):
+    """0.3.8: what a 對方 bubble's label shows: the user's name for that speaker, else "Speaker N" (fmt(n) in the UI
+    language). None = no label. `book` is the session's speakers.SpeakerBook."""
+    from ..speakers import LABEL_PREFIX
+
+    shown = book.display(label) if label else None
+    if not shown:
+        return None
+    if shown.startswith(LABEL_PREFIX) and shown[len(LABEL_PREFIX):].isdigit():
+        return fmt(int(shown[len(LABEL_PREFIX):]))
+    return shown
+
+
 class SubtitleState:
     """What the overlay shows: last `max_lines` lines; a draft is replaced in place by the final."""
 
@@ -896,6 +1022,7 @@ class SubtitleState:
         self.max_lines = max_lines
         self.finals: list[tuple[str, str]] = []  # (src, target), oldest first
         self.draft: tuple[str, str] | None = None
+        self.whos: list[str | None] = []  # 0.3.8: speaker token of each final (aligned with finals; None = none)
         self.pending: list[str] = []  # #53: sources heard, translation still running (newest one is the draft)
         self.paused = False  # frozen display: events still update the state (nothing is lost) but nothing is redrawn
 
@@ -917,10 +1044,12 @@ class SubtitleState:
                 self.pending.pop(0)
             self.draft = ("", self.pending[-1]) if self.pending else None
             self.finals.append((ev[1], ev[2]))
-            del self.finals[:-self.max_lines]
+            self.whos.append(ev[3] if len(ev) > 3 else None)
+            del self.finals[:-self.max_lines], self.whos[:-self.max_lines]
         elif kind == "final_side":  # #1001: a speak-leg line next to a listen session: the draft row stays
             self.finals.append((ev[1], ev[2]))
-            del self.finals[:-self.max_lines]
+            self.whos.append(None)
+            del self.finals[:-self.max_lines], self.whos[:-self.max_lines]
         elif kind == "clear":
             if self.draft is None:
                 return False
@@ -935,6 +1064,10 @@ class SubtitleState:
         if self.draft:
             rows.append((self.draft[1], True))
         return rows[-self.max_lines:]
+
+    def history_who(self) -> list[str | None]:
+        """0.3.8: speaker token per history() row (None for the draft and for lines without one)."""
+        return list(self.whos) + ([None] if self.draft else [])
 
     def source(self) -> str:
         """Source text of the newest shown line."""
@@ -1007,3 +1140,56 @@ def load_status_text(msg: str) -> str:
         parts.append(t("gui_st_part", name=_stage_name(pm.group(1)), s=pm.group(2)) if pm else p)
     text = t("gui_st_loaded", s=m.group(1))
     return text + (t("gui_st_parts", parts=t("gui_st_sep").join(parts)) if parts else "")
+
+
+SLOW_LOAD_SECS = 10.0  # above this the main window shows one friendly line instead of the breakdown
+
+
+def slow_load_line(elapsed: float) -> str:
+    """The friendly line shown WHILE the models are still loading once SLOW_LOAD_SECS have passed (Tk after() timer
+    started at Start); "" before that. Never shown after ready."""
+    from ..i18n import t
+
+    return t("gui_load_slow") if elapsed >= SLOW_LOAD_SECS else ""
+
+
+# 0.3.8: speaker avatars. Colorblind-friendly (Okabe-Ito based) hues that read on the dark navy chat background.
+SPK_PALETTE = ("#E69F00", "#56B4E9", "#2EC4A0", "#F0E442", "#CC79A7", "#FF8C69", "#9BB7FF", "#B8E986")
+SPK_AVATAR_FG = "#0B1220"  # dark text on the colored badge
+
+
+class SpeakerColors:
+    """Speaker label -> palette color, assigned in first-seen order and kept for the session (a rename never changes it;
+    more speakers than colors reuse the palette from the start)."""
+
+    def __init__(self, palette=SPK_PALETTE):
+        self.palette = tuple(palette)
+        self._idx: dict[str, int] = {}
+
+    def color(self, raw: str) -> str:
+        if raw not in self._idx:
+            self._idx[raw] = len(self._idx)
+        return self.palette[self._idx[raw] % len(self.palette)]
+
+
+def speaker_prefix(book, colors, raw, fmt):
+    """Floating-subtitle prefix of a line: (text, color) like ("\u25cf Speaker 2: ", "#e6a23c"), or None without a
+    resolved speaker. Same name lookup (speaker_text: renames, "Speaker N" in the UI language) and same palette color
+    as the main-window avatar, so the bar needs no extra row: the prefix sits in front of the line's own text."""
+    shown = speaker_text(book, raw, fmt) if raw else None
+    if not shown:
+        return None
+    sep = "\uff1a" if any(ord(c) > 0x2e80 for c in shown) else ": "
+    return f"\u25cf {shown}{sep}", colors.color(raw)
+
+
+def speaker_initial(book, raw: str) -> str:
+    """The avatar text: the speaker number for the default "Speaker N" label, else the first character of the name."""
+    from ..speakers import LABEL_PREFIX
+
+    shown = book.display(raw) if raw else None
+    if not shown:
+        return ""
+    if shown.startswith(LABEL_PREFIX) and shown[len(LABEL_PREFIX):].isdigit():
+        return shown[len(LABEL_PREFIX):]
+    return shown[:1].upper()
