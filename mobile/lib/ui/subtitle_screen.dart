@@ -4,6 +4,7 @@ import '../logic/phone_audio.dart';
 import '../logic/target_language.dart';
 import '../services/pipeline.dart';
 import '../services/playback_capture.dart';
+import 'advanced_screen.dart';
 
 /// Full-screen dark subtitle view.
 ///
@@ -24,12 +25,19 @@ class SubtitleScreen extends StatelessWidget {
         '${p.lastTokens ?? '-'} tok | ttft $ttft | q ${p.queued} | drop ${p.dropped}';
   }
 
+  /// Grey line at the bottom: the source draft (#1064; not in 中文-only mode), else '…'.
+  String _draftText() {
+    final d = pipeline.draftRu;
+    if (d.isEmpty || (d != '…' && pipeline.overlayStyle.mode == SubtitleMode.zh)) return '…';
+    return d;
+  }
+
   @override
   Widget build(BuildContext context) {
     final subs = pipeline.subtitles;
     final size = MediaQuery.sizeOf(context);
     final landscape = size.width > size.height;
-    final big = landscape ? 46.0 : 38.0;
+    final big = pipeline.overlayStyle.screenFontSize(landscape: landscape);
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -105,9 +113,9 @@ class SubtitleScreen extends StatelessWidget {
                 child: Text(
                   pipeline.silenceHint
                       ? silenceHintText
-                      : (pipeline.draftRu.isEmpty ? '…' : pipeline.draftRu),
+                      : _draftText(),
                   style: TextStyle(
-                      fontSize: 22,
+                      fontSize: pipeline.overlayStyle.secondaryFontSize,
                       color: pipeline.silenceHint ? Colors.amber : const Color(0xFF8A8A8A),
                       height: 1.25),
                   maxLines: 3,
@@ -143,7 +151,7 @@ class SubtitleScreen extends StatelessWidget {
       parts = [text(s.ru, fs, bright)];
     } else if (pending) {
       // Still translating: its source text in gray.
-      parts = [text(s.ru, 22, gray)];
+      parts = [text(s.ru, pipeline.overlayStyle.secondaryFontSize, gray)];
     } else {
       final zh = s.zh!;
       final src = s.ru.trim();
@@ -169,7 +177,23 @@ class _SourceToggle extends StatelessWidget {
   Future<void> _select(BuildContext context, bool toPhone) async {
     if (toPhone == (pipeline.source == AudioSourceKind.phone)) return;
     final messenger = ScaffoldMessenger.of(context);
-    if (toPhone && !await PlaybackCapture.overlayAllowed()) {
+    if (toPhone && CapturePlatform.current().explainsBeforeStart) {
+      // iOS (#1076): the system broadcast sheet comes next; say what to tap and what to expect.
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (c) => AlertDialog(
+          title: const Text(CaptureModeText.phoneLabel),
+          content: const SingleChildScrollView(child: Text(CaptureModeText.iosStartExplain)),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(c, true),
+                child: const Text(CaptureModeText.iosStartButton)),
+          ],
+        ),
+      );
+      if (go != true) return;
+    } else if (toPhone && !await PlaybackCapture.overlayAllowed()) {
       if (!context.mounted) return;
       final go = await showDialog<bool>(
         context: context,
@@ -244,6 +268,7 @@ void _showOverlaySettings(BuildContext context, Pipeline pipeline) {
       listenable: pipeline,
       builder: (context, _) {
         final st = pipeline.overlayStyle;
+        final plat = CapturePlatform.current();
         return Padding(
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
           child: Column(
@@ -264,27 +289,51 @@ void _showOverlaySettings(BuildContext context, Pipeline pipeline) {
               const SizedBox(height: 4),
               const Text('雙語：原文在上（小字），譯文在下。聽龍畫面和浮動視窗都適用。',
                   style: TextStyle(fontSize: 13, color: Colors.white60)),
-              if (pipeline.phoneSupported) ...[
-                const SizedBox(height: 16),
-                const Text('浮動字幕視窗', style: TextStyle(fontSize: 16)),
-                const SizedBox(height: 4),
-                const Text('拖曳字幕可移動，拖曳右下角 ⇲ 可調寬度，高度隨內容增加。點一下回到聽龍。',
+              const SizedBox(height: 8),
+              Text('字幕大小 ${st.fontSize.round()}（聽龍畫面和浮動視窗都適用）'),
+              Slider(
+                value: st.fontSize,
+                min: OverlayStyle.minFontSize,
+                max: OverlayStyle.maxFontSize,
+                divisions: (OverlayStyle.maxFontSize - OverlayStyle.minFontSize).round(),
+                onChanged: (v) => pipeline.setOverlayStyle(st.copyWith(fontSize: v)),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('顯示原文草稿'),
+                subtitle: const Text('一句話還沒說完時，先用灰字顯示聽到的原文，說完後換成正式字幕。'
+                    '會多用一些耗電和記憶體。',
                     style: TextStyle(fontSize: 13, color: Colors.white60)),
+                value: pipeline.prefs.sourceDraft,
+                onChanged: pipeline.setSourceDraft,
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('進階功能'),
+                subtitle: const Text('中文草稿、手機速度測試與建議',
+                    style: TextStyle(fontSize: 13, color: Colors.white60)),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.of(context).push(
+                      MaterialPageRoute<void>(builder: (_) => AdvancedScreen(pipeline: pipeline)));
+                },
+              ),
+              if (pipeline.phoneSupported) ...[
+                const SizedBox(height: 8),
+                Text(plat.overlayTitle, style: const TextStyle(fontSize: 16)),
+                const SizedBox(height: 4),
+                Text(plat.overlayHelp,
+                    style: const TextStyle(fontSize: 13, color: Colors.white60)),
                 const SizedBox(height: 12),
-                Text('字級 ${st.fontSize.round()}'),
-                Slider(
-                  value: st.fontSize,
-                  min: OverlayStyle.minFontSize,
-                  max: OverlayStyle.maxFontSize,
-                  divisions: (OverlayStyle.maxFontSize - OverlayStyle.minFontSize).round(),
-                  onChanged: (v) => pipeline.setOverlayStyle(st.copyWith(fontSize: v)),
-                ),
-                Text('背景不透明度 ${(st.opacity * 100).round()}%'),
-                Slider(
-                  value: st.opacity,
-                  divisions: 20,
-                  onChanged: (v) => pipeline.setOverlayStyle(st.copyWith(opacity: v)),
-                ),
+                if (plat.overlayOpacityAdjustable) ...[
+                  Text('背景不透明度 ${(st.opacity * 100).round()}%'),
+                  Slider(
+                    value: st.opacity,
+                    divisions: 20,
+                    onChanged: (v) => pipeline.setOverlayStyle(st.copyWith(opacity: v)),
+                  ),
+                ],
               ],
             ],
           ),

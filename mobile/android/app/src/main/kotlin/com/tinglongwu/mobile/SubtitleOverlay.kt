@@ -45,6 +45,8 @@ object SubtitleOverlay {
     private var bgAlpha = 0.6f
     private var lastLines: List<Line> = emptyList()
     private var lastHint: String? = null
+    private var lastDraft: String = ""
+    private var lastDraftTr: String = ""
     private var clip: BottomClip? = null
 
     /** One subtitle: source text (shown smaller, above) and/or translation; null = not shown. */
@@ -72,9 +74,11 @@ object SubtitleOverlay {
         sync()
     }
 
-    fun update(lines: List<Line>, hint: String?) {
+    fun update(lines: List<Line>, hint: String?, draft: String? = null, draftTr: String? = null) {
         lastLines = lines
         lastHint = hint
+        lastDraft = draft?.trim().orEmpty()
+        lastDraftTr = draftTr?.trim().orEmpty()
         render()
     }
 
@@ -154,7 +158,7 @@ object SubtitleOverlay {
                         w.updateViewLayout(box, p)
                     }
                 }
-                MotionEvent.ACTION_UP -> if (!dragging) openApp(ctx)
+                MotionEvent.ACTION_UP -> if (!dragging) openApp(ctx) else rememberFractions(lastW, lastH)
             }
             true
         }
@@ -167,6 +171,7 @@ object SubtitleOverlay {
                     p.width = (startW + (e.rawX - downX)).roundToInt().coerceIn(dp(ctx, 160f), screenW)
                     w.updateViewLayout(box, p)
                 }
+                MotionEvent.ACTION_UP -> rememberFractions(lastW, lastH)
             }
             true
         }
@@ -178,13 +183,57 @@ object SubtitleOverlay {
             return
         }
         wm = w; root = box; text = tv; clip = cl
+        val dm0 = ctx.resources.displayMetrics
+        lastW = dm0.widthPixels; lastH = dm0.heightPixels
+        rememberFractions(lastW, lastH)
+        ctx.registerComponentCallbacks(configCb)
         applyStyle()
         render()
     }
 
     private fun detach() {
         try { wm?.removeView(root) } catch (_: Exception) {}
+        try { app?.unregisterComponentCallbacks(configCb) } catch (_: Exception) {}
         root = null; text = null; wm = null; clip = null
+    }
+
+    // Rotation (#1078): the window position/width were in portrait pixels, so after landscape the
+    // overlay sat below the screen. Keep them as screen fractions and refit on every size change.
+    // Same algorithm as lib/logic/overlay_geometry.dart (fitOverlay), which has the unit tests.
+    private var fx = 0.04f
+    private var fy = 0.70f
+    private var widthFrac = 0.92f
+    private var lastW = 0
+    private var lastH = 0
+
+    private fun rememberFractions(sw: Int, sh: Int) {
+        val p = params ?: return
+        if (sw <= 0 || sh <= 0) return
+        fx = p.x.toFloat() / sw; fy = p.y.toFloat() / sh; widthFrac = p.width.toFloat() / sw
+    }
+
+    private fun fitToScreen() {
+        val ctx = app ?: return
+        val p = params ?: return
+        val r = root ?: return
+        val dm = ctx.resources.displayMetrics
+        val sw = dm.widthPixels; val sh = dm.heightPixels
+        if (sw == lastW && sh == lastH) return
+        lastW = sw; lastH = sh
+        val minW = minOf(dp(ctx, 160f), sw)
+        p.width = (sw * widthFrac).roundToInt().coerceIn(minW, sw)
+        val h = minOf(r.height, sh)
+        p.x = (sw * fx).roundToInt().coerceIn(0, maxOf(0, sw - p.width))
+        p.y = (sh * fy).roundToInt().coerceIn(0, maxOf(0, sh - h))
+        clip?.maxH = (sh * MAX_HEIGHT_FRACTION).roundToInt()
+        try { wm?.updateViewLayout(r, p) } catch (_: Exception) {}
+    }
+
+    private val configCb = object : android.content.ComponentCallbacks {
+        override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post { fitToScreen(); clip?.requestLayout() }
+        }
+        override fun onLowMemory() {}
     }
 
     private fun applyStyle() {
@@ -204,14 +253,15 @@ object SubtitleOverlay {
             tv.text = hint
             tv.setTextColor(Color.rgb(255, 200, 90))
         } else {
-            tv.text = format(lastLines)
+            tv.text = format(lastLines, lastDraft, lastDraftTr)
             tv.setTextColor(Color.WHITE)
         }
         clip?.requestLayout()
+        fitToScreen()
     }
 
     /** Oldest first; each source line smaller and gray above its translation. */
-    private fun format(lines: List<Line>): CharSequence {
+    private fun format(lines: List<Line>, draft: String, draftTr: String): CharSequence {
         val b = SpannableStringBuilder()
         for (l in lines) {
             val src = l.src?.trim().orEmpty()
@@ -231,6 +281,24 @@ object SubtitleOverlay {
                 if (b.isNotEmpty()) b.append('\n')
                 b.append(tr)
             }
+        }
+        // Interim source text of the sentence still being spoken: small, gray, replaced by the
+        // final line above once recognized (#1064).
+        if (draft.isNotEmpty()) {
+            if (b.isNotEmpty()) b.append('\n')
+            val start = b.length
+            b.append(draft)
+            b.setSpan(RelativeSizeSpan(SOURCE_SCALE), start, b.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            b.setSpan(ForegroundColorSpan(Color.rgb(160, 160, 160)), start, b.length,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        // Chinese draft (#1065, optional): gray, below the source draft.
+        if (draftTr.isNotEmpty()) {
+            if (b.isNotEmpty()) b.append('\n')
+            val start = b.length
+            b.append(draftTr)
+            b.setSpan(ForegroundColorSpan(Color.rgb(160, 160, 160)), start, b.length,
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
         return if (b.isEmpty()) "…" else b
     }

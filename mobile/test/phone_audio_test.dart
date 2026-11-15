@@ -125,6 +125,28 @@ void main() {
     });
   });
 
+  group('subtitle size mapping (#1079)', () {
+    test('default keeps the old in-app sizes', () {
+      expect(const OverlayStyle().screenFontSize(landscape: false), closeTo(38, 0.01));
+      expect(const OverlayStyle().screenFontSize(landscape: true), closeTo(46, 0.01));
+    });
+    test('grows with the slider and survives persist/parse', () {
+      final small = const OverlayStyle(fontSize: 14).screenFontSize(landscape: false);
+      final big = OverlayStyle.parse(const OverlayStyle(fontSize: 36).format())
+          .screenFontSize(landscape: false);
+      expect(big, greaterThan(small));
+      expect(OverlayStyle.parse(const OverlayStyle(fontSize: 36).format()).fontSize, 36);
+    });
+  });
+
+  group('pending/draft size follows the slider (#1092)', () {
+    test('scales around the old fixed 22 sp', () {
+      expect(const OverlayStyle(fontSize: 40).secondaryFontSize, greaterThan(22));
+      expect(const OverlayStyle(fontSize: 12).secondaryFontSize, lessThan(22));
+      expect(const OverlayStyle().secondaryFontSize, closeTo(22, 1));
+    });
+  });
+
   group('OverlayStyle (#998)', () {
     test('parse/format round trip and fallbacks', () {
       const s = OverlayStyle(fontSize: 24, opacity: 0.35);

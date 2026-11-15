@@ -467,13 +467,15 @@ def apply_cpu_mode(a, dev: str, mdir, explicit_model: bool, cores=None, ram_gb=N
     return st
 
 
-def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice=None, cpu_line=None) -> None:
+def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice=None, cpu_line=None,
+                labeler_factory=None, on_topic=None) -> None:
     """Load models and run the pipeline for parsed args `a`. Shared by the CLI and the GUI.
 
     sink: base sink (default: text on stdout); draft_factory(asr, translator, segmenter, tgt) -> draft engine
     or None; stop: threading.Event that ends the run; status(str): progress notes (GUI);
     notice(str): a note that should stay visible (GUI), e.g. why the GPU is not used;
-    cpu_line(mt_ms): #780, CPU only, called once per output line with the translation time in ms (GUI status)."""
+    cpu_line(mt_ms): #780, CPU only, called once per output line with the translation time in ms (GUI status);
+    on_topic(topic): #611, with --topics: called on the summarizer thread with each finished topics.Topic (GUI panel)."""
     from .asr import FasterWhisperRecognizer
     from .device import resolve_device
     from .merge import SentenceMerger
@@ -572,10 +574,18 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
         if getattr(a, "topics", None):  # #609
             from . import topics
 
-            notes = topics.attach(sink, a.topics)
+            notes = topics.attach(sink, a.topics, on_topic=on_topic)
     if stop is not None and stop.is_set():
         return
     source = select_backend(a.file, a.mic, a.device)
+    if notice is not None and hasattr(source, "on_silent"):  # #1070: ~10 s of no sound: say what is listened to
+        from .i18n import t as _t_silent
+
+        source.on_silent = lambda names: notice(_t_silent("listen_silent", names=" / ".join(names) or "?"))
+        if hasattr(source, "on_sound"):  # the hint must not outlive the silence (0.3.8)
+            from .i18n import SILENT_CLEAR
+
+            source.on_sound = lambda: notice(SILENT_CLEAR)
     recorder = None
     if rec_dir is not None:  # #239: opt-in only (the menu asks on every start, default no)
         from .record import Recorder, default_record_dir
@@ -609,6 +619,14 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
 
         prog.stage("speaker model")
         labeler = make_labeler(mdir)
+    elif labeler_factory is not None:  # 0.3.8 GUI: speaker ID off the subtitle path; None = unavailable, no labels
+        labeler = labeler_factory(mdir)
+        if labeler is not None and hasattr(labeler, "resolve"):
+            w = sink
+            while w is not None:  # the saved transcript gets "說話者 N", never the "spk#N" token
+                if hasattr(w, "resolve_speaker"):
+                    w.resolve_speaker = labeler.resolve
+                w = getattr(w, "inner", None)
     lat =(lambda m: print(m, file=sys.stderr, flush=True)) if getattr(a, "debug_latency", False) else None
     on_record, rec_file = latency_recorder(getattr(a, "latency_jsonl", None), lat) if not audio_clock else (None, None)
     close_voice, interrupted = None, False
@@ -628,10 +646,12 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
                 source.on_reopen = sink.capture_guard  # #710: a device change cannot loop the meeting voice
         seg_gate = None
         vgate = getattr(a, "voice_gate", None)
-        if getattr(a, "voice", False) and (vgate is not None or (a.mic and not a.file)):
+        gui_speak = getattr(a, "mic_mute", None) is not None  # #1070: the GUI speak leg is gated with or without voice
+        if gui_speak or (getattr(a, "voice", False) and (vgate is not None or (a.mic and not a.file))):
             from .reverse.gate import segment_gate  # #968: a spoken line goes out in the user's voice
 
-            seg_gate = segment_gate(getattr(vgate, "reject", None))
+            # #1070: ASR is pinned to My language (--lang); text in another script is Whisper drifting, dropped
+            seg_gate = segment_gate(getattr(vgate, "reject", None), lang=None if a.lang == "auto" else a.lang)
         muted = getattr(a, "mic_mute", None)  # #1028: the GUI mic toggle silences this leg's capture only
         playback = getattr(sink, "playback", None) if (a.mic and not a.file) else None
         if playback is not None:  # #1052: half-duplex: our own voice must not be heard by our own mic
