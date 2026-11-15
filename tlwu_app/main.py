@@ -6,6 +6,7 @@
   tlwu.exe --smoke              clean-machine check: load every native library, no models, exit 1 on failure
   tlwu.exe --run-selfupdate <a>  auto-update child (network; tinglongwu_setup.selfupdate, never tinglongwu) #768
   tlwu.exe setup <args>        tlwu-setup on the command line (network; e.g. setup --whisper small --langs ru --to zh)
+  tlwu.exe speak-smoke <args>  #974 one 我來說 press without the window (tinglongwu/speaksmoke.py; CI)
   tlwu.exe <any tlwu flag>      the normal command line (e.g. --file x.mp3 --to zh, --mic, --gui)
 """
 from __future__ import annotations
@@ -155,6 +156,10 @@ def main(argv=None) -> int:
         return run_setup_worker(rest if "--models-dir" in rest else rest + ["--models-dir", str(mdir)])
     argv, cpu = split_cpu(argv)
     mdir = prepare_env(bundled, cpu)
+    if argv[:1] == ["speak-smoke"]:  # #974: one GUI speak press without the window (install-clean.yml speak-smoke)
+        from tinglongwu.speaksmoke import main as smoke_main
+
+        return smoke_main(argv[1:])
     if not argv or argv in (["--gui"], ["--setup"]):
         if bundled:
             hide_own_console()
