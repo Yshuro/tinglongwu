@@ -455,11 +455,16 @@ def apply_cpu_mode(a, dev: str, mdir, explicit_model: bool, cores=None, ram_gb=N
     auto-picked model is lowered to the policy size when that is downloaded, TLWU_CPU_THREADS is kept. beam / threads
     go to the recognizer via a.cpu_beam / a.cpu_threads; the MT engine's llama.cpp threads go to threads.set_cpu_mode
     (#1198). merge=True raises an unset --min-words to the meeting value (3); an explicit --min-words wins.
+    #1254: another tlwu instance already running in CPU mode keeps its threads; this one plans for what is left
+    (at least instances.MIN_THREADS), registers its own and warns once with the other PIDs.
     Returns the CpuMode (None when not on the CPU)."""
     from . import threads as thread_budget
 
     if dev != "cpu":
         thread_budget.set_cpu_mode(None)  # a GPU run after a CPU run in the same GUI process: llama.cpp defaults
+        from . import instances
+
+        instances.release()  # #1254: no CPU threads registered for a GPU run
         return None
     from .hwprobe import cpu_mode_threads, ram_mib, cpu_mode_settings
     from .models import whisper_installed
@@ -467,7 +472,11 @@ def apply_cpu_mode(a, dev: str, mdir, explicit_model: bool, cores=None, ram_gb=N
     if ram_gb is None:
         mib = ram_mib()
         ram_gb = mib / 1024 if mib else 16.0  # unknown RAM: the middle tier
-    n = cores or os.cpu_count() or 4
+    from . import instances
+
+    cpus = cores or os.cpu_count() or 4
+    busy = instances.others()  # #1254: other tlwu instances already on this CPU keep their threads
+    n = instances.budget(cpus, busy) if busy else cpus
     st = cpu_mode_settings(n, ram_gb)
     plan = cpu_mode_threads(n)  # #1198: Whisper + Hy-MT2 together never ask for more threads than the CPU has
     thread_budget.set_cpu_mode(plan.mt, plan.mt_batch)
@@ -479,6 +488,10 @@ def apply_cpu_mode(a, dev: str, mdir, explicit_model: bool, cores=None, ram_gb=N
     a.cpu_beam = st.beam
     env_threads = (os.environ.get("TLWU_CPU_THREADS") or "").strip()
     a.cpu_threads = int(env_threads) if env_threads.isdigit() and int(env_threads) > 0 else st.threads
+    mine = a.cpu_threads + (0 if getattr(a, "transcript_only", False) else plan.mt)
+    instances.register(mine)  # #1254: a later instance sees these threads as taken
+    if busy:
+        print(instances.warning(cpus, busy, mine), file=sys.stderr, flush=True)
     if st.merge and not getattr(a, "min_words_explicit", True):  # fragment merging on: at least the meeting value
         a.min_words = max(a.min_words, PRESET_MIN_WORDS["meeting"])
     return st
@@ -628,6 +641,9 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
 
             notes = topics.attach(sink, a.topics, on_topic=on_topic)
     if stop is not None and stop.is_set():
+        from . import instances
+
+        instances.release()
         return
     source = select_backend(a.file, a.mic, a.device)
     if notice is not None and hasattr(source, "on_silent"):  # #1070: ~10 s of no sound: say what is listened to
@@ -734,6 +750,9 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
             recorder.close()
         if close_voice is not None:  # Ctrl+C / GUI Stop: do not keep talking through the backlog
             close_voice(drop=interrupted or (stop is not None and stop.is_set()))
+        from . import instances
+
+        instances.release()  # #1254: this session's CPU threads are free for another instance
 
 
 def backlog_text(seconds: int) -> str:
