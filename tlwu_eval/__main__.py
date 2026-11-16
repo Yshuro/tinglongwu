@@ -61,18 +61,25 @@ def cpu_mode_asr(a, dev: str, model: str, cores=None, ram_gb=None):
     """#781: (model, beam, threads) for the ASR. Without --cpu-mode, or off the CPU: (model, None, None), the
     recognizer defaults (beam 5). With --cpu-mode on the CPU: hwprobe.cpu_mode_settings for this PC, like tlwu
     (#780): beam / threads from the policy; the model is lowered to the policy size unless --model was given."""
+    from tinglongwu import threads as thread_budget
+
     if not getattr(a, "cpu_mode", False) or dev != "cpu":
+        thread_budget.set_cpu_mode(None)  # #1198: a defaults run after a CPU-mode run in one process: llama.cpp defaults
         return model, None, None
-    from tinglongwu.hwprobe import cpu_mode_settings, ram_mib
+    from tinglongwu.hwprobe import cpu_mode_settings, cpu_mode_threads, ram_mib
 
     if ram_gb is None:
         mib = ram_mib()
         ram_gb = mib / 1024 if mib else 16.0
-    st = cpu_mode_settings(cores or os.cpu_count() or 4, ram_gb)
+    n = cores or os.cpu_count() or 4
+    st = cpu_mode_settings(n, ram_gb)
+    plan = cpu_mode_threads(n)
+    thread_budget.set_cpu_mode(plan.mt, plan.mt_batch)  # #1198: the MT engine gets CPU mode's threads too, like tlwu
     order = ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"]
     if not a.model and model in order and order.index(model) > order.index(st.size):
         model = st.size
-    print(f"tlwu-eval: CPU mode: model {model}, beam {st.beam}, threads {st.threads}", file=sys.stderr)
+    print(f"tlwu-eval: CPU mode: model {model}, beam {st.beam}, threads {st.threads}, "
+          f"mt threads {plan.mt}/{plan.mt_batch}", file=sys.stderr)
     return model, st.beam, st.threads
 
 
