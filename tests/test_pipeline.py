@@ -115,3 +115,102 @@ def test_identical_final_lines_collapse():
     out = io.StringIO()
     run(Src(), OneSeg(), Rep(), None, TranscriptSink(out), audio_clock=True)
     assert out.getvalue().splitlines() == ["мы можем готовить в следующем году.", "совсем другое предложение здесь"]
+
+
+def test_backlog_reported_and_cleared(wav, tmp_path):
+    """#1259: a slow ASR makes run() report whole seconds behind, then 0 once it caught up."""
+    import time
+
+    from tinglongwu import pipeline
+
+    class SlowASR(CountingASR):
+        def transcribe(self, audio):
+            time.sleep(1.2)
+            return super().transcribe(audio)
+
+    seen = []
+    old = pipeline.BACKLOG_POLL
+    pipeline.BACKLOG_POLL = 0.05
+    try:
+        run(FileSource(str(wav)), Segmenter(chunk=0.5, use_vad=False), SlowASR(), None, TextSink(io.StringIO()),
+            on_backlog=seen.append)
+    finally:
+        pipeline.BACKLOG_POLL = old
+    assert max(seen) >= 1 and all(n >= 0 for n in seen)
+
+
+def test_no_backlog_callback_when_asr_fast(wav):
+    """#1259: nothing is reported while ASR keeps up."""
+    seen = []
+    run(FileSource(str(wav)), Segmenter(chunk=1.0, use_vad=False), FakeASR(), None, TextSink(io.StringIO()),
+        on_backlog=seen.append)
+    assert seen == []
+
+
+def test_backlog_text():
+    from tinglongwu.cli import backlog_text
+
+    assert backlog_text(0) == "" and backlog_text(7) == "ASR 7 s behind"
+
+
+def test_budget_cut_tail_is_transcribed_before_the_next_segment(wav):
+    """#1252 step 3: the audio a time-budget cut left undecoded is transcribed next, so its words still reach the
+    output (before the following segment), instead of being lost."""
+    class CutASR(Recognizer):
+        def __init__(self):
+            self.lens, self._tail, self.n = [], None, 0
+
+        def transcribe(self, audio):
+            self.lens.append(len(audio))
+            self.n += 1
+            if self.n == 1:  # cut at half: the second half was never decoded
+                self._tail = audio[len(audio) // 2:]
+                return Transcript("один", "ru")
+            return Transcript(["", "два", "три", "четыре", "пять"][min(self.n - 1, 4)], "ru")
+
+        def pop_tail(self):
+            tail, self._tail = self._tail, None
+            return tail
+
+    asr = CutASR()
+    out = io.StringIO()
+    run(FileSource(str(wav)), Segmenter(chunk=1.0, use_vad=False), asr, None, TranscriptSink(out))
+    lines = out.getvalue().split()
+    assert lines[:2] == ["один", "два"]  # the tail's text comes right after the cut sentence
+    assert asr.lens[1] == asr.lens[0] - asr.lens[0] // 2  # call 2 got exactly the undecoded tail
+    assert len(asr.lens) >= 3  # the following segments still run
+
+
+def test_budget_cut_tail_survives_a_live_model_switch(wav):
+    """#1295: after the controller switches the ASR model (adapt.Switchable), the tail of a budget-cut segment
+    is read from the model that cut it, not from the one that was current when the pipeline started."""
+    from tinglongwu import adapt
+
+    class Big(Recognizer):
+        def transcribe(self, audio):
+            ladder.down()  # the controller steps down while the first segment is decoded
+            return Transcript("один", "ru")
+
+    class Small(Recognizer):
+        def __init__(self):
+            self.lens, self._tail, self.n = [], None, 0
+
+        def transcribe(self, audio):
+            self.lens.append(len(audio))
+            self.n += 1
+            if self.n == 1:
+                self._tail = audio[len(audio) // 2:]
+                return Transcript("два", "ru")
+            return Transcript("хвост" if self.n == 2 else "три", "ru")
+
+        def pop_tail(self):
+            tail, self._tail = self._tail, None
+            return tail
+
+    small = Small()
+    ladder = adapt.Ladder("speech model", "big", Big(), [("small", lambda: small)])
+    out = io.StringIO()
+    run(FileSource(str(wav)), Segmenter(chunk=1.0, use_vad=False), adapt.Switchable(ladder), None, TranscriptSink(out))
+    assert small.lens[1] == small.lens[0] - small.lens[0] // 2  # the tail was transcribed by the new model
+    words = out.getvalue().split()
+    assert "хвост" in words and words.index("хвост") < words.index("три")  # tail text first, before the next segment

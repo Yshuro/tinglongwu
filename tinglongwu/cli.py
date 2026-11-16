@@ -120,7 +120,8 @@ def parse_args(argv=None):
                         "audio start to the first translated draft and to the final line")
     p.add_argument("--paced", action="store_true",
                    help="with --file: release the audio in real time and use the live clock, like live capture "
-                        "(for latency measurements; output text is unchanged)")
+                        "(latency measurements, meeting replay #1264); on the CPU the live ASR time budget applies "
+                        "as in live capture")
     p.add_argument("--latency-jsonl", metavar="PATH",
                    help="append one JSON line per final line to PATH: seconds from the end of speech to the segment "
                         "cut (vad), ASR done (asr), sentence-merge release (merge), translation shown (mt), the "
@@ -455,19 +456,40 @@ def apply_cpu_mode(a, dev: str, mdir, explicit_model: bool, cores=None, ram_gb=N
     auto-picked model is lowered to the policy size when that is downloaded, TLWU_CPU_THREADS is kept. beam / threads
     go to the recognizer via a.cpu_beam / a.cpu_threads; the MT engine's llama.cpp threads go to threads.set_cpu_mode
     (#1198). merge=True raises an unset --min-words to the meeting value (3); an explicit --min-words wins.
+    #1254: another tlwu instance already running in CPU mode keeps its threads; this one plans for what is left
+    (at least instances.MIN_THREADS), registers its own and warns once with the other PIDs.
     Returns the CpuMode (None when not on the CPU)."""
     from . import threads as thread_budget
 
     if dev != "cpu":
         thread_budget.set_cpu_mode(None)  # a GPU run after a CPU run in the same GUI process: llama.cpp defaults
+        from . import instances
+
+        instances.release()  # #1254: no CPU threads registered for a GPU run
         return None
     from .hwprobe import cpu_mode_threads, ram_mib, cpu_mode_settings
-    from .models import whisper_installed
 
     if ram_gb is None:
         mib = ram_mib()
         ram_gb = mib / 1024 if mib else 16.0  # unknown RAM: the middle tier
-    n = cores or os.cpu_count() or 4
+    from . import instances
+
+    cpus = cores or os.cpu_count() or 4
+    with instances.allocating():  # #1254: two instances starting together plan one after the other
+        busy = instances.others()  # other tlwu instances already on this CPU keep their threads
+        n = instances.budget(cpus, busy) if busy else cpus
+        st = _cpu_mode_plan(a, n, ram_gb, mdir, explicit_model, thread_budget, cpu_mode_settings, cpu_mode_threads)
+        mine = a.cpu_threads + (0 if getattr(a, "transcript_only", False) else thread_budget.current()["mt"])
+        instances.register(mine)  # a later instance sees these threads as taken
+    if busy:
+        print(instances.warning(cpus, busy, mine), file=sys.stderr, flush=True)
+    return st
+
+
+def _cpu_mode_plan(a, n, ram_gb, mdir, explicit_model, thread_budget, cpu_mode_settings, cpu_mode_threads):
+    """apply_cpu_mode's settings for `n` CPUs (the part that runs under the #1254 allocation lock)."""
+    from .models import whisper_installed
+
     st = cpu_mode_settings(n, ram_gb)
     plan = cpu_mode_threads(n)  # #1198: Whisper + Hy-MT2 together never ask for more threads than the CPU has
     thread_budget.set_cpu_mode(plan.mt, plan.mt_batch)
@@ -484,21 +506,46 @@ def apply_cpu_mode(a, dev: str, mdir, explicit_model: bool, cores=None, ram_gb=N
     return st
 
 
-def cpu_fallback_mt(asked: str, got: str, cores=None) -> bool:
+def cpu_fallback_mt(asked: str, got: str, cores=None, asr_threads=None, transcript_only=False) -> bool:
     """#1198: Whisper fell back from CUDA to the CPU after apply_cpu_mode ran for CUDA: give the MT engine (built
     next) the CPU-mode llama.cpp threads too. True when it did."""
     if asked == "cpu" or got != "cpu":
         return False
+    from . import instances
     from . import threads as thread_budget
+    from .asr import cpu_fallback_settings
     from .hwprobe import cpu_mode_threads
 
-    plan = cpu_mode_threads(cores or os.cpu_count() or 4)
-    thread_budget.set_cpu_mode(plan.mt, plan.mt_batch)
+    cpus = cores or os.cpu_count() or 4
+    with instances.allocating():  # #1254: the fallback session is counted by (and counts) other instances
+        busy = instances.others()
+        plan = cpu_mode_threads(cpus)
+        asr = asr_threads or cpu_fallback_settings(None, None, cores=cpus)[1] or plan.asr  # Whisper is loaded already
+        mt = plan.mt if not busy else max(1, min(plan.mt, instances.budget(cpus, busy) - asr))
+        thread_budget.set_cpu_mode(mt, min(plan.mt_batch, mt) if busy else plan.mt_batch)
+        mine = asr + (0 if transcript_only else mt)
+        instances.register(mine)
+    if busy:
+        print(instances.warning(cpus, busy, mine), file=sys.stderr, flush=True)
     return True
 
 
 def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice=None, cpu_line=None,
-                labeler_factory=None, on_topic=None) -> None:
+                labeler_factory=None, on_topic=None, backlog_line=None, mt_wait_line=None) -> None:
+    """_run_session; #1254: the CPU threads this session registered are released however it ends, also when
+    loading fails before the pipeline starts (a GUI process lives on after a failed start)."""
+    from . import instances
+
+    try:
+        _run_session(a, sink=sink, draft_factory=draft_factory, stop=stop, status=status, notice=notice,
+                     cpu_line=cpu_line, labeler_factory=labeler_factory, on_topic=on_topic, backlog_line=backlog_line,
+                     mt_wait_line=mt_wait_line)
+    finally:
+        instances.release()
+
+
+def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice=None, cpu_line=None,
+                 labeler_factory=None, on_topic=None, backlog_line=None, mt_wait_line=None) -> None:
     """Load models and run the pipeline for parsed args `a`. Shared by the CLI and the GUI.
 
     sink: base sink (default: text on stdout); draft_factory(asr, translator, segmenter, tgt) -> draft engine
@@ -506,6 +553,8 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
     notice(str): a note that should stay visible (GUI), e.g. why the GPU is not used;
     cpu_line(mt_ms, path): #780, CPU only, called once per output line with the translation time in ms and
     (#1198) path = (backend, threads) of the MT model or None (GUI status);
+    backlog_line(seconds): #1259, whole seconds ASR is behind the audio (0 = caught up); default: one stderr line per change.
+    mt_wait_line(lines): #1253, translations held while ASR catches up (0 = MT resumed); default: one stderr line per change.
     on_topic(topic): #611, with --topics: called on the summarizer thread with each finished topics.Topic (GUI panel)."""
     from .asr import FasterWhisperRecognizer
     from .device import resolve_device
@@ -582,9 +631,10 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
     asr = FasterWhisperRecognizer(mdir, a.model, a.lang, dev, glossary=glossary,
                                   candidates=cands, lang_file=getattr(a, "lang_file", None),
                                   beam=getattr(a, "cpu_beam", None), threads=getattr(a, "cpu_threads", None))
-    cpu_fallback_mt(dev, asr.device)  # #1198: a CUDA load that fell back to the CPU gets CPU mode's MT threads
+    cpu_fallback_mt(dev, asr.device, asr_threads=getattr(a, "cpu_threads", None),
+                    transcript_only=bool(a.transcript_only))  # #1198: a CUDA load that fell back to the CPU gets CPU mode's MT threads
     dev = asr.device  # may have fallen back to cpu
-    asr.live = dev == "cpu" and not a.file  # #251: live CPU listening caps ASR retries and time per sentence
+    asr.live = asr_live(dev, a.file, getattr(a, "paced", False))  # #251 / #1264
     cpu_max_wait(a, dev)
     translator = None
     if not a.transcript_only:
@@ -719,7 +769,9 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
             speakers=labeler, on_work=cpu_on_work(None if (dev != "cpu" or a.file) else SlowWatch(say=warn).observe,
                                                   cpu_line if dev == "cpu" else None,
                                                   lambda: active_mt_path(translator)),
-            on_record=on_record, recorder=recorder, seg_gate=seg_gate, route=f2f_route)
+            on_record=on_record, recorder=recorder, seg_gate=seg_gate, route=f2f_route,
+            on_backlog=backlog_line or (lambda n: print(backlog_text(n) or "tlwu: ASR caught up", file=sys.stderr, flush=True)),
+            on_mt_wait=mt_wait_line or (lambda n: print(f"tlwu: {mt_wait_text(n) or 'MT resumed'}", file=sys.stderr, flush=True)))
     except KeyboardInterrupt:
         interrupted = True
         raise
@@ -732,6 +784,21 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
             recorder.close()
         if close_voice is not None:  # Ctrl+C / GUI Stop: do not keep talking through the backlog
             close_voice(drop=interrupted or (stop is not None and stop.is_set()))
+
+
+def backlog_text(seconds: int) -> str:
+    """#1259: the status line for an ASR backlog; "" when ASR is not behind."""
+    return f"ASR {int(seconds)} s behind" if seconds > 0 else ""
+
+
+def mt_wait_text(lines: int) -> str:
+    """#1253: the status line while translations wait for ASR to catch up; "" when none wait."""
+    return f"MT paused for ASR: {int(lines)} line(s) waiting" if lines > 0 else ""
+
+
+def status_wait_text(seconds: int, lines: int) -> str:
+    """#1259 + #1253: ASR backlog and held translations in one status line; "" when neither applies."""
+    return " | ".join(p for p in (backlog_text(seconds), mt_wait_text(lines)) if p)
 
 
 def cpu_on_work(observe, cpu_line, path=None):
@@ -755,6 +822,13 @@ def active_mt_path(translator):
     from .hymt import active_path
 
     return active_path(translator) if translator is not None else None
+
+
+def asr_live(dev: str, file, paced: bool) -> bool:
+    """#251: live CPU listening caps ASR retries and time per sentence. #1264: a --paced file is live too (real
+    time, live clock), so a replay drops / cuts sentences exactly where live capture would; an unpaced file runs
+    faster than real time and keeps full decoding."""
+    return dev == "cpu" and (not file or bool(paced))
 
 
 def latency_recorder(path, log):

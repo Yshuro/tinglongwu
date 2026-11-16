@@ -35,6 +35,15 @@ class _Quiet(NamedTuple):
 # Ctrl+C: on Windows a blocking Queue.get() with no timeout is not interruptible, so the main thread
 # always waits in short slices and KeyboardInterrupt is delivered within ~POLL seconds.
 POLL = 0.25
+BACKLOG_POLL = 0.5  # #1259: how often the ASR backlog is re-measured
+# #1253: while ASR is at least MT_YIELD_S behind the audio (the #1259 "ASR n s behind" line is showing), MT starts
+# no new line, so ASR gets the CPU back (owner field test, 12-CPU laptop: with MT on, ASR dropped ~2x as many
+# sentences as ASR-only). The source line is shown at once; its translation waits until ASR has caught up (nothing
+# queued, not transcribing), or at most MT_HOLD_MAX per line, so translations still trickle out on a CPU that never
+# catches up. A line already being translated is not interrupted.
+MT_YIELD_S = 1.0
+MT_HOLD_MAX = 30.0
+MT_HOLD_POLL = 0.05
 DUP_WINDOW = 10.0  # seconds: an identical final line this soon after the same one is dropped (Whisper repeats on silence)
 
 
@@ -75,7 +84,7 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
         merger: SentenceMerger | None = None, audio_clock: bool = False, draft=None,
         stop_event: threading.Event | None = None, log=None, on_latency=None, speakers=None,
         on_work=None, on_record=None, recorder=None,  # recorder: #239 --record (record.Recorder)
-        seg_gate=None, route=None) -> None:
+        seg_gate=None, route=None, on_backlog=None, on_mt_wait=None, mt_yield: bool | None = None) -> None:
     """Capture -> segments -> ASR -> (sentence merge) -> translate -> sink.
 
     Translation and output run in their own worker thread (one, so lines stay in order): ASR of the next
@@ -96,12 +105,47 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
     seg_gate(seg, transcript) -> bool (#968, speak mode): False drops the segment before it reaches the merger, so
     keyboard noise or a low-confidence Whisper guess never becomes a line that is sent in the user's voice.
     route(lang) -> target (#1164 face-to-face): the target language of one utterance, chosen from its detected language.
+    on_backlog(seconds) (#1259): whole seconds ASR is behind the audio (queued segments plus the overrun of the one
+    being transcribed); called when the value changes within ~0.5 s, 0 once it has caught up. Never called when off.
+    mt_yield (#1253, default: live clock with a translator): while ASR is >= MT_YIELD_S behind, MT starts no new line
+    (source lines still show at once; translations follow when ASR catches up, at most MT_HOLD_MAX s late per line).
+    on_mt_wait(lines) (#1253): number of lines whose translation is held for ASR; called when it changes, 0 when MT
+    resumes. on_record gets the held seconds as "mt_hold".
     """
     tgt0 = tgt
-    q: queue.Queue = queue.Queue(maxsize=8)
+    # #1263: live capture is never held back by ASR. A bounded queue blocked the capture reader while ASR lagged and
+    # the device then dropped audio with no trace; segments wait here instead (raw 16 kHz float32: 64 KB per second).
+    # Offline files (audio_clock) keep the bound: they are read faster than real time and lose nothing by waiting.
+    q: queue.Queue = queue.Queue(maxsize=8 if audio_clock else 0)
     consumed = [0]
     frame_t = [0.0]  # monotonic arrival time of the newest frame (#323)
     stop = threading.Event()
+    queued_s = [0.0]  # #1259: seconds of audio in segments waiting for ASR
+    asr_start = [None, 0.0]  # #1259: (monotonic start, audio seconds) of the segment in ASR
+    bl_lock = threading.Lock()
+
+    def asr_lag() -> float:
+        with bl_lock:
+            lag = queued_s[0]
+            if asr_start[0] is not None:
+                lag += max(0.0, time.monotonic() - asr_start[0] - asr_start[1])
+        return lag
+
+    def backlog_seconds() -> int:
+        return int(asr_lag())
+
+    def asr_idle() -> bool:
+        """#1253: nothing waits for ASR and no segment is being transcribed."""
+        with bl_lock:
+            return queued_s[0] < 0.05 and asr_start[0] is None
+
+    def watch_backlog():
+        last = 0
+        while not stop.wait(BACKLOG_POLL):
+            n = backlog_seconds()
+            if n != last:
+                last = n
+                on_backlog(n)
 
     def counted(frames):
         for f in frames:
@@ -125,7 +169,11 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
                     if stop.is_set():
                         return
                     pause = float(getattr(segmenter, "last_pause", 0.0))
-                    if not put((seg, consumed[0] / SAMPLE_RATE, getattr(segmenter, "epoch", 1) - 1,
+                    with bl_lock:
+                        queued_s[0] += len(seg) / SAMPLE_RATE
+                    # #1252: the segment's own end on the audio clock (a pause cut ends before the input read so far)
+                    end_s = (consumed[0] - int(getattr(segmenter, "last_trail", 0) or 0)) / SAMPLE_RATE
+                    if not put((seg, end_s, getattr(segmenter, "epoch", 1) - 1,
                                 bool(getattr(segmenter, "last_forced", False)), pause,
                                 (frame_t[0] - pause, time.monotonic()))):  # (end of speech, cut) for on_record
                         return
@@ -204,6 +252,36 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
     missing: set = set()  # (src, tgt) pairs already reported as not installed
     mtq: queue.Queue = queue.Queue()  # units waiting for MT + output; unbounded (short text)
     failed: list[BaseException] = []
+    yield_on = (not audio_clock and translator is not None) if mt_yield is None else bool(mt_yield and translator)
+    asr_over = threading.Event()  # #1253: the ASR loop ended (end of input / Stop): no reason to hold MT any more
+    waiting = [0]  # #1253: lines held for ASR (on_mt_wait)
+
+    def stopping() -> bool:
+        """#1253: the internal stop or the caller's Stop (GUI) - set while ASR may still be busy in a long call."""
+        return stop.is_set() or (stop_event is not None and stop_event.is_set())
+
+    def tell_wait(n: int) -> None:
+        if n != waiting[0]:
+            waiting[0] = n
+            if on_mt_wait is not None:
+                on_mt_wait(n)
+
+    def yield_to_asr(item) -> float:
+        """#1253: hold this line's MT while ASR is behind; returns the seconds held (0 when MT ran at once)."""
+        if not yield_on or asr_over.is_set() or asr_lag() < MT_YIELD_S:
+            return 0.0
+        lang = item[1]
+        if lang == (route(lang) if route is not None else tgt0):
+            return 0.0  # shown as is, no MT
+        t0 = time.monotonic()
+        until = item[3] + MT_HOLD_MAX  # from when the line was queued: time behind an earlier held line counts too
+        while (not stopping() and not asr_over.is_set() and not asr_idle()
+               and time.monotonic() < until):
+            tell_wait(mtq.qsize() + 1)
+            time.sleep(MT_HOLD_POLL)
+        held = time.monotonic() - t0
+        say(f"latency: hold mt {held * 1000:.0f} ms for ASR ({mtq.qsize()} more line(s) waiting)")
+        return held
 
     def mt_worker() -> None:
         while True:
@@ -216,6 +294,10 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
             if item is _DONE or stop.is_set():
                 return
             try:
+                held = yield_to_asr(item)
+                tell_wait(0)
+                if stopping():
+                    return  # Stop during the hold: start no translation or output after run() returned
                 t_emit = time.monotonic()
                 clip[0] = item[9]  # #239: audio of this line (only the MT thread reads it)
                 if draft is not None:
@@ -225,6 +307,7 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
                     rec = _record(item, time.monotonic())
                     d = getattr(draft, "last_first_draft", None) if draft is not None else None
                     rec["draft"] = None if d is None else round(d, 3)  # #511: seconds to the first draft, null = none
+                    rec["mt_hold"] = round(held, 3)  # #1253: part of "mt" spent waiting for ASR to catch up
                     on_record(rec)
                 if on_work is not None:
                     on_work(item[4], time.monotonic() - t_emit, item[5])
@@ -263,13 +346,18 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
 
     producer = threading.Thread(target=produce, daemon=True)
     producer.start()
+    if on_backlog is not None:
+        threading.Thread(target=watch_backlog, daemon=True).start()
     worker = threading.Thread(target=mt_worker, daemon=True)
     worker.start()
     if draft is not None:
         if merger is not None and hasattr(draft, "held"):  # #273 re-translation: drafts show, finals wait for a
             merger.whole = True  # whole sentence (a timeout cuts at a clause boundary, never mid-clause)
             draft.held = lambda: (merger.buf, merger.lang)
+        if yield_on:  # #1253: drafts do not compete with a lagging ASR either (a running draft is not interrupted)
+            draft.asr_behind = lambda: asr_lag() >= MT_YIELD_S
         draft.start(stop)
+    carry = []  # #1252: the undecoded tail of a budget-cut segment, transcribed before the next queued segment
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
@@ -280,7 +368,7 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
             if has_deadline:
                 timeout = min(POLL, max(0.0, merger.deadline - time.monotonic()))
             try:
-                item = q.get(timeout=timeout)
+                item = carry.pop() if carry else q.get(timeout=timeout)
             except queue.Empty:
                 if has_deadline:
                     emit_units(merger.due(time.monotonic()))
@@ -294,11 +382,28 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
                     emit_units(merger.quiet(item.seconds, item.stamp if audio_clock else time.monotonic()))
                 continue
             seg, stamp, last_ep[0], forced_cut, pause, (t_eos, t_cut) = item
+            with bl_lock:
+                queued_s[0] = max(0.0, queued_s[0] - len(seg) / SAMPLE_RATE)
             if float(np.sqrt(np.mean(seg ** 2))) < SILENCE_RMS:
                 continue  # silence: skip (avoids Whisper hallucinations)
             with model_lock():
                 t0 = time.monotonic()
-                t = asr.transcribe(seg)
+                with bl_lock:
+                    asr_start[0], asr_start[1] = t0, len(seg) / SAMPLE_RATE
+                pin = getattr(asr, "pinned", None)
+                cur = pin() if callable(pin) else asr  # #1295: one model for transcribe and its pop_tail
+                try:
+                    t = cur.transcribe(seg)
+                finally:
+                    with bl_lock:
+                        asr_start[0] = None
+                pop_tail = getattr(cur, "pop_tail", None)
+                tail = pop_tail() if callable(pop_tail) else None
+            if tail is not None and len(tail):  # #1252: a budget cut left the end of this segment undecoded:
+                # transcribe it next, before any newer segment (lost source text cannot be recovered; late is fine)
+                carry.append((tail, stamp, last_ep[0], forced_cut, pause, (t_eos, t_cut)))
+                with bl_lock:
+                    queued_s[0] += len(tail) / SAMPLE_RATE
             last_asr[0] = time.monotonic() - t0
             marks = (t_eos, t_cut, t0 + last_asr[0])
             last_len[0] = len(seg) / SAMPLE_RATE
@@ -325,6 +430,7 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
                                    forced_cut=forced_cut, pause=pause, tag=tag))
         if merger is not None and translator is not None:
             emit_units(merger.flush())
+        asr_over.set()
         mtq.put(_DONE)
         while worker.is_alive():  # finish the queued lines (short waits: Ctrl+C stays responsive)
             if stop_event is not None and stop_event.is_set():
@@ -335,6 +441,7 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
             say("latency: " + draft.flicker_line())
     finally:
         stop.set()
+        asr_over.set()
         mtq.put(_DONE)
         if draft is not None:
             draft.renderer.clear()

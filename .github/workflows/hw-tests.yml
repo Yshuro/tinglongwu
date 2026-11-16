@@ -11,11 +11,11 @@ name: hw-tests
 # step must not block a release snapshot); drop continue-on-error per step once its issue links a green run.
 #
 # SECURITY: a self-hosted runner runs whatever the workflow says, so this file never runs for pull requests (no
-# pull_request / pull_request_target trigger) and only for pushes to dev by people with write access, or a manual
-# dispatch (#976: release-pr.yml dispatches it on this repo's release/vX.Y.Z snapshot branch). Do not add other triggers.
+# pull_request / pull_request_target trigger) and only for a manual
+# dispatch (people with write access) (#976: release-pr.yml dispatches it on this repo's release/vX.Y.Z snapshot branch). Do not add other triggers.
 on:
-  push:
-    branches: [dev]
+  # #1266: no push trigger. Dev pushes queued behind each other on the single runner and delayed release snapshots;
+  # hw-tests runs on release snapshots (release-pr.yml dispatch), nightly (hw-nightly.yml) and by hand.
   workflow_dispatch:
     inputs:
       hymt7b:
@@ -176,6 +176,24 @@ jobs:
           cat "$RUNNER_TEMP/check_348.txt"
           { echo "### $(grep -E '^(PASS|FAIL)' "$RUNNER_TEMP/check_348.txt")"; } >> "$GITHUB_STEP_SUMMARY"
           exit $rc
+
+      # #1247: the saved lines, log and mic_report.json (missed clips, where the longest gap is) of the live mic
+      # check, so a FAIL can be read without the owner PC. Text only (no wavs, no models): a few hundred KB.
+      # Mic-check files only, listed by name: meeting.* / loopback.* hold transcripts of real speaker / WASAPI
+      # loopback capture on the owner PC and must not reach public-repo artifacts (Opus review on #1248).
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        with:
+          name: hw-live-checks
+          path: |
+            ${{ runner.temp }}/live/mic_file.jsonl
+            ${{ runner.temp }}/live/mic_live.jsonl
+            ${{ runner.temp }}/live/mic_live.log
+            ${{ runner.temp }}/live/mic_report.json
+            ${{ runner.temp }}/check_*.txt
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: "#313 tlwu doctor on the owner PC (real GPU, real audio devices)"
         if: ${{ !cancelled() }}

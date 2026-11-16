@@ -34,6 +34,11 @@ Hy-MT2-1.8B (the engine tlwu ships, Q4_K_M GGUF, llama.cpp on the CPU, greedy `T
 
 The Korean and tier-2 rows (#656) come from [eval-flores 43535177705](https://github.com/sunososobro-hub/tinglongwu/actions/runs/43535177705), commit 22efa0f, same settings; each job's runner CPU is in the engine column (4 vCPU each, so s/sentence differs by CPU, e.g. tha on the older EPYC 7763). That run also re-ran rus/eng/jpn and got the same chrF and COMET as above to the last digit (greedy decoding is repeatable). All seven land at COMET 0.875-0.880, between Russian (0.865) and Japanese (0.885).
 
+### Language-pair matrix: en / ru / zh-Hans / zh-Hant / ja / ko (#1305)
+Every direction between the six languages (30 cells, rows = source, columns = target), Hy-MT2-1.8B Q4_K_M on the CPU, greedy, first 200 FLORES-200 devtest sentences per direction (the full 1012 stay for the X -> zh-Hant rows above), same chrF + COMET. Each cell is `COMET / chrF`; "(weak)" marks a cell whose COMET is below the weakest shipped direction (en / ru / ja / ko -> zh-Hant) of the same run. zh-Hans <-> zh-Hant is OpenCC script conversion (`tinglongwu.translate.zh_convert`), not MT, as in the app. Directions the app cannot select today are measured too: the table is the data for deciding what to enable. Run it with `gh workflow run eval-flores.yml --ref dev -f matrix=6x6`; the `table` job writes the table to its step summary and the `flores-6x6-table` artifact.
+
+Results: pending the first `matrix=6x6` run (table, run link and commit go here).
+
 ### Hy-MT2 sampling temperature (#107)
 
 Same 1012 FLORES-200 devtest sentences and metrics, Hy-MT2-1.8B Q4_K_M on 4-vCPU GitHub runners, temperature 0.7 (model-card default, shipped before #107) vs 0.2 vs 0 (greedy); top_p 0.6, top_k 20, repeat_penalty 1.05 unchanged. U+FFFD = hypotheses containing the replacement character (suspected cause of #632). Run: [eval-flores 43554407306](https://github.com/sunososobro-hub/tinglongwu/actions/runs/43554407306), commit 3e145b4; per-sentence JSON in its `flores-<src>-t<temp>` artifacts. Each job got a different runner CPU (last column), so s/sentence compares CPUs as much as temperatures.
@@ -169,3 +174,36 @@ What this shows:
 - A on the same runner twice: p50 3.655 vs 3.692 s (1% noise), chrF and WER identical. The same commit on different runner CPUs gives different A numbers (p50 3.66-5.28 s; zh->en chrF 43.42 on AMD vs 48.63 on Intel). Compare A and B only within one run.
 
 Reproduce a sweep: put a `scripts/bench/cpu_ab_variants.json` such as `[{"name": "small-b1-t4", "args": "--engine hymt2-cpu --model small --beam 1 --asr-threads 4"}]` on a branch and dispatch `bench-cpu-ab` on it. `tlwu_eval --beam N --asr-threads N` override the defaults and `--cpu-mode`. The workflow installs only Whisper small. A variant with another `--model` needs that model in `$TLWU_MODELS` first (`tlwu-setup --whisper base --models-dir "$TLWU_MODELS"`): run it locally, or add it to the branch's bench run. The base rows above came from a temporary branch patch that ran this setup step.
+
+### MT step on the CPU: quantization and threads (#745, #1198)
+
+Can a smaller Hy-MT2 quant or another thread split give the MT step the speed the p50 -30% target needs? `scripts/bench/mt_cpu_threads.py` in `bench-cpu-ab` run [43861606238](https://github.com/sunososobro-hub/tinglongwu/actions/runs/43861606238) (AMD EPYC 9V74, 4 vCPU = 2 physical cores, 15 GB, commit e3ffbfc), 20 smoke lines, greedy, with Whisper small beam 1 transcribing in the background unless noted. The non-Q4_K_M quants were made on the runner from the published Q8_0 with llama.cpp's quantizer (bench only, never shipped).
+
+Thread plans, Q4_K_M (the shipped quant):
+
+| plan | asr / mt / mt batch threads | MT median s/line | MT p90 s | chrF | Whisper s/clip (during MT) |
+|---|---|---|---|---|---|
+| old | 3 / 2 / 4 | 3.21 | 4.53 | 48.54 | 3.73 |
+| cpu-mode (shipped, #1198) | 2 / 2 / 2 | 2.61 | 3.71 | 48.54 | 2.66 |
+| physical | 1 / 1 / 1 | 2.44 | 3.43 | 48.54 | 3.30 |
+| mt-heavy | 1 / 3 / 3 | 1.88 | 2.80 | 48.54 | 4.31 |
+| old, Whisper off | 3 / 2 / 4 | 1.35 | 1.97 | 48.54 | - |
+| cpu-mode, Whisper off | 2 / 2 / 2 | 1.37 | 1.97 | 48.54 | - |
+
+Quants, cpu-mode threads:
+
+| quant | MT median s/line | MT p90 s | chrF | Whisper s/clip (during MT) |
+|---|---|---|---|---|
+| Q4_K_M (shipped) | 2.64 | 3.64 | 48.54 | 2.71 |
+| Q4_0 | 2.93 | 3.94 | 48.20 | 2.74 |
+| Q4_K_S | 2.39 | 4.01 | 47.15 | 2.78 |
+| IQ4_XS | 3.27 | 4.93 | 48.94 | 2.69 |
+| Q3_K_M | 3.25 | 4.80 | 48.27 | 2.41 |
+| Q3_K_S | 3.28 | 5.12 | 48.32 | 2.61 |
+| IQ3_M | 5.16 | 7.67 | 48.47 | 2.70 |
+| Q2_K | 2.94 | 4.25 | 39.73 | 2.60 |
+
+What this shows:
+- No quant is faster than Q4_K_M by more than the noise without losing chrF. Q4_K_S is 9% faster at the median but slower at p90 and 1.4 chrF lower; Q2_K loses 8.8 chrF. The 3-bit and IQ quants are slower on this CPU (more dequantization work per token on 2 physical cores).
+- Alone, the MT step is 1.35 s per line whatever the thread split. Under load the split only moves time between Whisper and MT: mt-heavy makes MT 28% faster than cpu-mode but Whisper 62% slower, so the line is not faster.
+- Together with the settings sweep above: neither Whisper settings, MT threads nor MT quants reach a 30% lower p50 at the #745 quality limits on a 4 vCPU CPU. The shipped CPU mode keeps Q4_K_M and the #1198 thread split. A larger cut needs a different, smaller MT model, which needs its own chrF / COMET eval first.

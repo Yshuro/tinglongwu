@@ -13,6 +13,8 @@ Targets (#745): p50 drop >= 30%, chrF drop <= 1.0, WER rise <= 2 points. The rea
 
 Below the table: the clips whose ASR or MT text differs between A and B. chrF / WER can only move through them; on
 the 20-clip smoke set one changed clip moves its pair's chrF by up to ~5 points (#745).
+Below that: a paired bootstrap 95% interval of the overall chrF drop (clips resampled within each pair, the same
+draw for A and B), so a drop can be read against the noise of the set. Needs the reports' per-clip `mt` / `ref_mt`.
 
 Variants (#745): with --run, every {"name", "args"} entry of --variants FILE (default scripts/bench/cpu_ab_variants.json,
 not in the repo: add it on a branch, then dispatch bench-cpu-ab) is run as one more tlwu_eval and gets its own table
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import shlex
 import statistics
@@ -156,6 +159,60 @@ def diff_report(rep_a: dict, rep_b: dict, limit: int = 10) -> str:
     return "\n".join(lines)
 
 
+def _chrf_fn():
+    """tlwu_eval's corpus chrF (the one the reports use); importable from a repo checkout or an installed tlwu."""
+    root = str(Path(__file__).resolve().parents[2])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from tlwu_eval.scoring import chrf
+    return chrf
+
+
+def chrf_drop_ci(rep_a: dict, rep_b: dict, n: int = 1000, seed: int = 0, chrf=None) -> dict | None:
+    """Paired bootstrap of the overall chrF drop (A - B, mean of per-pair corpus chrF, as in summarize): each round
+    draws clips with replacement within each pair and scores A and B on the same draw. Returns {drop, lo, hi, n_clips}
+    (95% percentile interval) or None when a report lacks per-clip `mt` / `ref_mt`. A clip without an `mt` value is
+    no data (left out on both sides), not an empty translation; an empty string is a real (empty) translation. If a
+    scored pair (one with a chrF or with per-clip refs) has no clip usable on both sides, the interval would cover
+    only part of the overall drop, so it is None too (#745)."""
+    chrf = chrf or _chrf_fn()
+
+    scored = set()
+
+    def pairs(rep):
+        out = {}
+        for lg in rep.get("languages", []):
+            clips = lg.get("clips", [])
+            if lg.get("chrf") is not None or any(c.get("ref_mt") for c in clips):
+                scored.add(lg["pair"])
+            out[lg["pair"]] = {c.get("id"): (c["ref_mt"], c["mt"]) for c in clips
+                               if c.get("ref_mt") and c.get("mt") is not None}
+        return out
+    a, b = pairs(rep_a), pairs(rep_b)
+    keys = {p: sorted(set(a.get(p, {})) & set(b.get(p, {})), key=str) for p in scored}
+    if not scored or not all(keys.values()):
+        return None
+
+    def drop(draw):
+        da = [chrf([a[p][i] for i in ids]) for p, ids in draw.items()]
+        db = [chrf([b[p][i] for i in ids]) for p, ids in draw.items()]
+        return sum(da) / len(da) - sum(db) / len(db)
+    rng = random.Random(seed)
+    boots = sorted(drop({p: [rng.choice(k) for _ in k] for p, k in keys.items()}) for _ in range(n))
+    lo, hi = boots[int(0.025 * (n - 1))], boots[int(round(0.975 * (n - 1)))]
+    return {"drop": drop(keys), "lo": lo, "hi": hi, "n_clips": sum(len(k) for k in keys.values())}
+
+
+def ci_line(ci: dict | None) -> str:
+    if ci is None:
+        return "chrF drop 95% interval: n/a (reports have no per-clip mt / ref_mt)"
+    lim = TARGETS["chrf_drop_max"]
+    where = ("inside the target" if ci["hi"] <= lim else "over the target" if ci["lo"] > lim
+             else "the target is inside the interval (not separable from noise on this set)")
+    return (f"chrF drop {ci['drop']:.2f}, paired bootstrap 95% interval [{ci['lo']:.2f}, {ci['hi']:.2f}] over "
+            f"{ci['n_clips']} clips; target <= {lim:g}: {where}")
+
+
 def load_variants(path, required: bool = False) -> list[tuple[str, str]]:
     """[(name, tlwu_eval args)] from a JSON list of {"name", "args"}. A missing default file = no variants; a missing
     file the user named (required=True) is an error, so a requested sweep never silently runs only A and B."""
@@ -229,6 +286,8 @@ def main(argv=None) -> int:
         print(table(sa, sb))
         print()
         print(diff_report(reps[0], reps[1]))
+        print()
+        print(ci_line(chrf_drop_ci(reps[0], reps[1])))
         for name, _args in variants:
             rv = json.loads((d / f"{name}.json").read_text("utf-8"))
             sv = summarize(rv, load_jsonl(d / f"{name}.jsonl") if (d / f"{name}.jsonl").exists() else None)
@@ -237,6 +296,8 @@ def main(argv=None) -> int:
             print(table(sa, sv))
             print()
             print(diff_report(reps[0], rv))
+            print()
+            print(ci_line(chrf_drop_ci(reps[0], rv)))
     except (OSError, ValueError, KeyError) as e:
         print(f"cpu_mode_ab: {e}", file=sys.stderr)
         return 2

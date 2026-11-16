@@ -106,6 +106,10 @@ class MainActivity : FlutterFragmentActivity() {
                         if (dir == null) result.error("NO_DIR", "external files dir unavailable", null)
                         else result.success(dir.absolutePath)
                     }
+                    // App-private internal files dir (/data/data/<pkg>/files): other apps cannot read
+                    // it. The subtitle history lives here (#1311), excluded from backup and device
+                    // transfer in res/xml/*_rules.xml.
+                    "privateFilesDir" -> result.success(filesDir.absolutePath)
                     // Cheap thermal/battery reading: battery temp (deg C), level %,
                     // PowerManager thermal status (0 none .. 6 shutdown, -1 n/a).
                     "stats" -> {
@@ -120,7 +124,7 @@ class MainActivity : FlutterFragmentActivity() {
                         result.success(mapOf("tempC" to temp, "level" to level, "thermal" to thermal))
                     }
                     // Model import (Storage Access Framework: no storage or INTERNET permission).
-                    "pickDocuments" -> importer.pick(result)
+                    "pickDocuments" -> importer.pick(result, call.argument<Boolean>("downloads") == true)
                     "importDocument" -> importer.import(call, result) { done, total ->
                         ch.invokeMethod("importProgress", mapOf("done" to done, "total" to total))
                     }
