@@ -16,6 +16,7 @@ workflows to main.
     python scripts/release_notes.py plan                               release.yml: publish? tag? (GITHUB_OUTPUT lines)
     python scripts/release_notes.py notes --version vX --base F --verification R [--pr N] [--hw-run URL] --out F
     python scripts/release_notes.py auto                               auto-release.yml: merge the release PR now?
+    python scripts/release_notes.py bump-check --pr N                  mergers: may this bump PR skip Opus? (#1267)
 
 Auto-release (#589): auto-release.yml runs `auto` after ci / e2e / windows-build / hw-tests complete on dev. It merges
 the open dev -> main release PR only when AUTO_RELEASE is true, the throttle issue is at level >= 1, the PR head is
@@ -329,6 +330,104 @@ def todo_whats_new(tag: str) -> str:
     return f"- TODO: add a `## {tag}` section to {WHATS_NEW_FILE} (the bump PR writes it)."
 
 
+_N = r"(0|[1-9][0-9]*)"  # canonical ASCII component: app_version keeps the spelling, the tag must match it
+VERSION_LINE_RE = re.compile(rf'^__version__[ \t]*=[ \t]*"{_N}\.{_N}\.{_N}"[ \t]*$')  # double quotes, as app_version
+
+
+def _patch_lines(patch: str) -> tuple[list[str], list[str]]:
+    """Removed and added lines of a GitHub `pulls/N/files` patch (hunk headers and context dropped)."""
+    removed, added = [], []
+    for line in (patch or "").split("\n"):  # physical LF lines only: splitlines() would also cut at \f, \v, \x1c...
+        if line.startswith("@@") or line.startswith("\\"):
+            continue
+        if line.startswith("-"):
+            removed.append(line[1:])
+        elif line.startswith("+"):
+            added.append(line[1:])
+    return removed, added
+
+
+def bump_exempt(files: list[dict], whats_new_text: str | None = None) -> tuple[bool, str]:
+    """#1267: a bump PR skips Opus only when its diff is the `__version__` patch bump in tinglongwu/__init__.py plus,
+    optionally, one new filled `## vX.Y.Z` section (same version) added to docs/whats_new.md and nothing else.
+    `files` is the `pulls/N/files` list (filename, status, patch); `whats_new_text` is docs/whats_new.md at the PR head
+    (needed when the PR touches it: the section must be the one the release reads, not hidden in a comment).
+    Returns (exempt, reason)."""
+    by = {f.get("filename"): f for f in files}
+    other = sorted(set(by) - {"tinglongwu/__init__.py", WHATS_NEW_FILE})
+    if other:
+        return False, f"other files: {', '.join(other)}"
+    init = by.get("tinglongwu/__init__.py")
+    if not init or init.get("status") != "modified":
+        return False, "no __version__ change"
+    removed, added = (_patch_lines(init.get("patch", "")))
+    old = [VERSION_LINE_RE.match(x) for x in removed]
+    new = [VERSION_LINE_RE.match(x) for x in added]
+    if len(removed) != 1 or len(added) != 1 or not old[0] or not new[0]:
+        return False, "tinglongwu/__init__.py changes more than the __version__ line"
+    o, n = tuple(map(int, old[0].groups())), tuple(map(int, new[0].groups()))
+    if n != (o[0], o[1], o[2] + 1):
+        return False, f"not a patch bump: {'.'.join(map(str, o))} -> {'.'.join(map(str, n))}"
+    tag = "v" + ".".join(map(str, n))
+    wn = by.get(WHATS_NEW_FILE)
+    if wn is None:
+        return True, f"version line only ({tag})"
+    if wn.get("status") != "modified":
+        return False, f"{WHATS_NEW_FILE} is {wn.get('status')}, not modified"
+    removed, added = _patch_lines(wn.get("patch", ""))
+    if removed:
+        return False, f"{WHATS_NEW_FILE} removes or edits existing lines"
+    runs, prev = 0, False  # the new section must be one contiguous block of added lines that starts at its heading
+    for line in (wn.get("patch") or "").split("\n"):
+        cur = line.startswith("+")
+        runs += cur and not prev
+        prev = cur
+    if runs != 1 or next((x for x in added if x.strip()), "") != f"## {tag}":
+        return False, f"{WHATS_NEW_FILE} must add one block that starts with `## {tag}`"
+    heads = [x for x in added if re.match(r"^ {0,3}#{1,6}(?:[ \t]|$)", x)]  # any GFM ATX heading, up to 3 spaces in
+    if heads != [f"## {tag}"]:
+        return False, f"{WHATS_NEW_FILE} must add exactly one `## {tag}` heading"
+    body = [x for x in added[added.index(f"## {tag}") + 1:] if x.strip()]
+    # plain one-level bullets only: no Setext/ATX heading (also not inside an item), quote, nested list, HTML or prose
+    if not all(re.match(r"^- (?![#>*+=<-]|[0-9]+[.)](?:\s|$))\S", x) for x in body):
+        return False, f"`## {tag}` section may only hold `- ` bullet lines"
+    if any(c != "\t" and (ord(c) < 32 or ord(c) == 127) for x in added for c in x):
+        return False, f"{WHATS_NEW_FILE} adds control characters"
+    section = whats_new_section("\n".join(added) + "\n", tag)
+    if section is None:
+        return False, f"`## {tag}` section is empty or TODO"
+    if whats_new_text is None:
+        return False, f"{WHATS_NEW_FILE} at the PR head not read"
+    if any("<!--" in x or "-->" in x for x in added):
+        return False, f"{WHATS_NEW_FILE} section may not open or close an HTML comment"
+    # Visibility, checked directly: the head document minus the added block (= the base) must have no readable
+    # `## tag` section, and the head document must read exactly the added one. Then the added block is the section
+    # the release reads, wherever comments or odd heading spellings sit in the rest of the file.
+    lines, n = whats_new_text.split("\n"), len(added)
+    at = [i for i in range(len(lines) - n + 1) if lines[i:i + n] == added]
+    if len(at) != 1:
+        return False, f"added block not found exactly once in {WHATS_NEW_FILE} at the PR head"
+    base = "\n".join(lines[:at[0]] + lines[at[0] + n:])
+    if whats_new_section(base, tag) is not None:
+        return False, f"{WHATS_NEW_FILE} already has a readable `## {tag}` section"
+    if whats_new_section(whats_new_text, tag) != section:
+        return False, f"`## {tag}` is not the section the release reads from {WHATS_NEW_FILE} (inside a comment?)"
+    return True, f"version line + {WHATS_NEW_FILE} `## {tag}` section"
+
+
+def bump_check_pr(head_of, files_of, text_at) -> tuple[bool, str, str]:
+    """#1267: bump_exempt on one PR revision. The head SHA is read before the file list and again after the
+    whats_new read; a push in between refuses the exemption. Returns (exempt, reason, checked head SHA); mergers merge
+    with that SHA as the expected head."""
+    head = head_of()
+    files = files_of()
+    text = text_at(head) if any(f.get("filename") == WHATS_NEW_FILE for f in files) else None
+    if head_of() != head:
+        return False, "PR head moved during the check; run it again", head
+    ok, why = bump_exempt(files, text)
+    return ok, why, head
+
+
 def throttle_level(body: str | None) -> int | None:
     """First line of the throttle issue (#574): `level: N`. None when missing or unreadable."""
     m = THROTTLE_RE.match((body or "").split("\n", 1)[0])
@@ -625,6 +724,10 @@ def main(argv=None) -> int:
     sub.add_parser("plan")
     sub.add_parser("snapshot")
     sub.add_parser("auto")
+    bc = sub.add_parser("bump-check", help="#1267: may this bump PR merge without an Opus PASS?")
+    bc.add_argument("--pr", required=True)
+    bc.add_argument("--files", default="", help="JSON of pulls/N/files (default: fetched with gh)")
+    bc.add_argument("--whats-new", default="", help="docs/whats_new.md at the PR head (default: fetched with gh)")
     n = sub.add_parser("notes")
     for k in ("--version", "--base", "--out"):
         n.add_argument(k, required=True)
@@ -634,6 +737,23 @@ def main(argv=None) -> int:
     n.add_argument("--head", default="")
     n.add_argument("--packs-manifest", default="", help="pack manifest JSON (tinglongwu/pack_manifest.py)")
     a = ap.parse_args(argv)
+    if a.cmd == "bump-check":
+        if a.files:
+            ok, why = bump_exempt(json.loads(read(a.files)), read(a.whats_new) if a.whats_new else None)
+            sha = ""
+        else:
+            rep = repo()
+
+            def text_at(sha):
+                r = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github.raw",
+                                    f"repos/{rep}/contents/{WHATS_NEW_FILE}?ref={sha}"],
+                                   capture_output=True, text=True, encoding="utf-8")
+                return r.stdout if r.returncode == 0 else None
+            ok, why, sha = bump_check_pr(lambda: gh_json("api", f"repos/{rep}/pulls/{a.pr}")["head"]["sha"],
+                                         lambda: gh_json("api", f"repos/{rep}/pulls/{a.pr}/files?per_page=100"),
+                                         text_at)
+        print(f"bump-exempt: {'yes' if ok else 'no'} ({why})" + (f" at {sha}" if sha else ""))
+        return 0 if ok else 1
     version = app_version((ROOT / "tinglongwu" / "__init__.py").read_text("utf-8"))
     rep = repo()
     if a.cmd == "plan":
