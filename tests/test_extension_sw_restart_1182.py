@@ -30,7 +30,7 @@ globalThis.chrome = {
   tabs: { sendMessage: async (id, m) => { sent.push([id, m]); }, onRemoved: { addListener() {} } },
   runtime: { sendMessage: async () => ({ ok: true }), onMessage: { addListener: (f) => { globalThis.__onMsg = f; } } },
 };
-const url = pathToFileURL(process.argv[2]).href;
+const url = pathToFileURL(process.argv[2]).href;  // a .mjs copy: loads as ESM on every Node version
 await import(url + "?boot=1");
 await globalThis.tlwu.startCapture(7);
 // service worker killed and restarted: new module instance, same storage
@@ -48,7 +48,9 @@ console.log(JSON.stringify({ lineSent, stored: store.capturedTab ?? null,
 def test_captured_tab_survives_service_worker_restart(tmp_path):
     drv = tmp_path / "drv.mjs"
     drv.write_text(JS, "utf-8")
-    out = subprocess.run(["node", str(drv), str(SW)], capture_output=True, text=True, timeout=60)
+    sw = tmp_path / "sw.mjs"
+    sw.write_text(SW.read_text("utf-8"), "utf-8")
+    out = subprocess.run(["node", str(drv), str(sw)], capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
     r = json.loads(out.stdout.strip().splitlines()[-1])
     assert r["lineSent"] == [[7, {"target": "overlay", "type": "line", "src": "hi", "text": "line"}]]

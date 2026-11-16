@@ -47,8 +47,9 @@ export async function stopCapture() {
   let r = { ok: true };
   await toTab({ type: "stop" });
   if (await chrome.offscreen.hasDocument()) r = await chrome.runtime.sendMessage({ target: "offscreen", type: "stop" });
-  if (capturedTab !== null) await chrome.action.setBadgeText({ tabId: capturedTab, text: "" });
-  await setCaptured(null);
+  const tab = capturedTab;
+  await setCaptured(null);  // clear state first: the badge call rejects for a tab that was closed
+  if (tab !== null) { try { await chrome.action.setBadgeText({ tabId: tab, text: "" }); } catch (_) { /* best effort */ } }
   return r;
 }
 
