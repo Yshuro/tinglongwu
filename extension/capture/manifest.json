@@ -13,7 +13,8 @@
   },
   "permissions": [
     "tabCapture",
-    "offscreen"
+    "offscreen",
+    "storage"
   ],
   "content_scripts": [
     {
