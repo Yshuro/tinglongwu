@@ -1,0 +1,114 @@
+{
+  "date": "2026-11-16",
+  "run_url": "https://github.com/sunososobro-hub/tinglongwu/actions/runs/43810676307",
+  "languages": [
+    {
+      "pair": "en->zh",
+      "clips": 20,
+      "asr_error_rate": 0.0788,
+      "chrf": 32.47,
+      "mt_median_s": 1.644,
+      "verdict": "PASS",
+      "why": ""
+    },
+    {
+      "pair": "ja->zh",
+      "clips": 20,
+      "asr_error_rate": 0.1511,
+      "chrf": 17.75,
+      "mt_median_s": 2.039,
+      "verdict": "PASS",
+      "why": ""
+    },
+    {
+      "pair": "ko->zh",
+      "clips": 20,
+      "asr_error_rate": 0.2576,
+      "chrf": 24.17,
+      "mt_median_s": 2.149,
+      "verdict": "PASS",
+      "why": ""
+    },
+    {
+      "pair": "ru->zh",
+      "clips": 20,
+      "asr_error_rate": 0.1369,
+      "chrf": 25.62,
+      "mt_median_s": 1.641,
+      "verdict": "PASS",
+      "why": ""
+    },
+    {
+      "pair": "hi->zh",
+      "clips": 20,
+      "asr_error_rate": 0.5206,
+      "chrf": 10.13,
+      "mt_median_s": 2.693,
+      "verdict": "PASS",
+      "why": ""
+    },
+    {
+      "pair": "vi->zh",
+      "clips": 20,
+      "asr_error_rate": 0.2111,
+      "chrf": 19.06,
+      "mt_median_s": 2.373,
+      "verdict": "PASS",
+      "why": ""
+    },
+    {
+      "pair": "th->zh",
+      "clips": 20,
+      "asr_error_rate": 0.2262,
+      "chrf": 12.48,
+      "mt_median_s": 3.052,
+      "verdict": "PASS",
+      "why": ""
+    },
+    {
+      "pair": "id->zh",
+      "clips": 20,
+      "asr_error_rate": 0.155,
+      "chrf": 22.08,
+      "mt_median_s": 1.01,
+      "verdict": "PASS",
+      "why": ""
+    },
+    {
+      "pair": "es->zh",
+      "clips": 20,
+      "asr_error_rate": 0.0501,
+      "chrf": 23.16,
+      "mt_median_s": 2.112,
+      "verdict": "PASS",
+      "why": ""
+    },
+    {
+      "pair": "de->zh",
+      "clips": 20,
+      "asr_error_rate": 0.09,
+      "chrf": 25.75,
+      "mt_median_s": 1.83,
+      "verdict": "PASS",
+      "why": ""
+    },
+    {
+      "pair": "fr->zh",
+      "clips": 20,
+      "asr_error_rate": 0.1575,
+      "chrf": 24.19,
+      "mt_median_s": 2.082,
+      "verdict": "PASS",
+      "why": ""
+    },
+    {
+      "pair": "zh->en",
+      "clips": 20,
+      "asr_error_rate": 0.2496,
+      "chrf": 48.28,
+      "mt_median_s": 1.538,
+      "verdict": "PASS",
+      "why": ""
+    }
+  ]
+}
