@@ -33,3 +33,24 @@ def test_single_dev_install_path_and_coc():
     assert "mobile/README.md" in c and "CODE_OF_CONDUCT.md" in c and "`needs-opus`" in c
     assert c.count("default answer is yes") == 1
     assert (ROOT / "CODE_OF_CONDUCT.md").exists() and (ROOT / "docs/history-rewrite.md").exists()
+
+
+def test_docs_page_leads_with_visuals(tmp_path, monkeypatch):
+    import importlib.util
+    import sys
+    import types
+
+    # The test env has no `markdown` package: stub it, the page order does not depend on it.
+    fake = types.ModuleType("markdown")
+    fake.markdown = lambda text, extensions=None: "<h1>Body text</h1>"
+    monkeypatch.setitem(sys.modules, "markdown", fake)
+    spec = importlib.util.spec_from_file_location("build_docs_page", ROOT / "scripts" / "build_docs_page.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.main(tmp_path)
+    page = (tmp_path / "docs.html").read_text("utf-8")
+    svg, grid, text = page.find("<svg"), page.find('<div class="grid">'), page.find("Body text")
+    assert 0 < svg < grid < text  # diagram first, then support grid, then text
+    rows = json.loads(_read("docs/support.json"))["language"]["rows"]
+    assert all(r["label"].split(" (")[0] in page for r in rows)
+    assert "Sound in" in page and "ASR" in page and "MT" in page
