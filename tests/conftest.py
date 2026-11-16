@@ -25,6 +25,9 @@ def _no_cpu_mode_threads():
     threads.set_cpu_mode(None)
     yield
     threads.set_cpu_mode(None)
+    from tinglongwu import instances
+
+    instances.release_all()  # #1254: no lock file held open from one test to the next
 
 
 @pytest.fixture
@@ -42,6 +45,8 @@ def _isolated_user_dirs(tmp_path, monkeypatch):
     """Network-guard logs / config go to a temp dir, never the real user dirs."""
     monkeypatch.setenv("TLWU_LOG_DIR", str(tmp_path / "_log"))
     monkeypatch.setenv("TLWU_CONFIG_DIR", str(tmp_path / "_cfg"))
+    # #1254: CPU-mode instance registry per test, never the real one of a tlwu running on this PC
+    monkeypatch.setenv("TLWU_INSTANCE_DIR", str(tmp_path / "_instances"))
     # GUI settings live under %APPDATA% on Windows: never read the developer's real gui.json in tests
     monkeypatch.setenv("APPDATA", str(tmp_path / "_appdata"))
     monkeypatch.delenv("TLWU_ALLOW_NET", raising=False)
