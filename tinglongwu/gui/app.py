@@ -2349,6 +2349,7 @@ class App:
                         notice=lambda m: q.put(("notice", m)),
                         cpu_line=lambda ms, path=None: q.put(("cpu_line", ms, path)),
                         backlog_line=lambda n: q.put(("backlog", n)),  # #1259
+                        mt_wait_line=lambda n: q.put(("mtwait", n)),  # #1253
                         labeler_factory=self._make_labeler if sink_cls is None and s.get("source") == "system" else None,
                         on_topic=self.topic_panel.add if sink_cls is None else None)  # #611
         except Exception as e:  # noqa: BLE001
@@ -2393,11 +2394,15 @@ class App:
                         logging.getLogger("tlwu.gui").info("%s", load_status_text(ev[1]))  # breakdown: log only
                         self._status_text(text)  # #294
                         self._sync_quick()
-                elif kind == "backlog":  # #1259: "ASR n s behind" in the status line, the old text back when caught up
-                    from ..cli import backlog_text
+                elif kind in ("backlog", "mtwait"):  # #1259: "ASR n s behind" in the status line, the old text back
+                    from ..cli import status_wait_text  # when caught up; #1253: plus translations held for ASR
 
+                    if kind == "backlog":
+                        self._backlog_s = ev[1]
+                    else:
+                        self._mt_wait_n = ev[1]
                     if self.load_t0 is None and not self.errored:
-                        line = backlog_text(ev[1])
+                        line = status_wait_text(getattr(self, "_backlog_s", 0), getattr(self, "_mt_wait_n", 0))
                         if line:
                             if getattr(self, "_pre_backlog", None) is None:
                                 self._pre_backlog = self.v_status.get()

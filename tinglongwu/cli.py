@@ -530,20 +530,21 @@ def cpu_fallback_mt(asked: str, got: str, cores=None, asr_threads=None, transcri
 
 
 def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice=None, cpu_line=None,
-                labeler_factory=None, on_topic=None, backlog_line=None) -> None:
+                labeler_factory=None, on_topic=None, backlog_line=None, mt_wait_line=None) -> None:
     """_run_session; #1254: the CPU threads this session registered are released however it ends, also when
     loading fails before the pipeline starts (a GUI process lives on after a failed start)."""
     from . import instances
 
     try:
         _run_session(a, sink=sink, draft_factory=draft_factory, stop=stop, status=status, notice=notice,
-                     cpu_line=cpu_line, labeler_factory=labeler_factory, on_topic=on_topic, backlog_line=backlog_line)
+                     cpu_line=cpu_line, labeler_factory=labeler_factory, on_topic=on_topic, backlog_line=backlog_line,
+                     mt_wait_line=mt_wait_line)
     finally:
         instances.release()
 
 
 def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice=None, cpu_line=None,
-                 labeler_factory=None, on_topic=None, backlog_line=None) -> None:
+                 labeler_factory=None, on_topic=None, backlog_line=None, mt_wait_line=None) -> None:
     """Load models and run the pipeline for parsed args `a`. Shared by the CLI and the GUI.
 
     sink: base sink (default: text on stdout); draft_factory(asr, translator, segmenter, tgt) -> draft engine
@@ -552,6 +553,7 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
     cpu_line(mt_ms, path): #780, CPU only, called once per output line with the translation time in ms and
     (#1198) path = (backend, threads) of the MT model or None (GUI status);
     backlog_line(seconds): #1259, whole seconds ASR is behind the audio (0 = caught up); default: one stderr line per change.
+    mt_wait_line(lines): #1253, translations held while ASR catches up (0 = MT resumed); default: one stderr line per change.
     on_topic(topic): #611, with --topics: called on the summarizer thread with each finished topics.Topic (GUI panel)."""
     from .asr import FasterWhisperRecognizer
     from .device import resolve_device
@@ -767,7 +769,8 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
                                                   cpu_line if dev == "cpu" else None,
                                                   lambda: active_mt_path(translator)),
             on_record=on_record, recorder=recorder, seg_gate=seg_gate, route=f2f_route,
-            on_backlog=backlog_line or (lambda n: print(backlog_text(n) or "tlwu: ASR caught up", file=sys.stderr, flush=True)))
+            on_backlog=backlog_line or (lambda n: print(backlog_text(n) or "tlwu: ASR caught up", file=sys.stderr, flush=True)),
+            on_mt_wait=mt_wait_line or (lambda n: print(f"tlwu: {mt_wait_text(n) or 'MT resumed'}", file=sys.stderr, flush=True)))
     except KeyboardInterrupt:
         interrupted = True
         raise
@@ -785,6 +788,16 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
 def backlog_text(seconds: int) -> str:
     """#1259: the status line for an ASR backlog; "" when ASR is not behind."""
     return f"ASR {int(seconds)} s behind" if seconds > 0 else ""
+
+
+def mt_wait_text(lines: int) -> str:
+    """#1253: the status line while translations wait for ASR to catch up; "" when none wait."""
+    return f"MT paused for ASR: {int(lines)} line(s) waiting" if lines > 0 else ""
+
+
+def status_wait_text(seconds: int, lines: int) -> str:
+    """#1259 + #1253: ASR backlog and held translations in one status line; "" when neither applies."""
+    return " | ".join(p for p in (backlog_text(seconds), mt_wait_text(lines)) if p)
 
 
 def cpu_on_work(observe, cpu_line, path=None):
