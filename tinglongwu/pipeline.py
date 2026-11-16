@@ -356,8 +356,6 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
             draft.asr_behind = lambda: asr_lag() >= MT_YIELD_S
         draft.start(stop)
     carry = []  # #1252: the undecoded tail of a budget-cut segment, transcribed before the next queued segment
-    pop_tail = getattr(asr, "pop_tail", None)
-    pop_tail = pop_tail if callable(pop_tail) else None
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
@@ -390,12 +388,15 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
                 t0 = time.monotonic()
                 with bl_lock:
                     asr_start[0], asr_start[1] = t0, len(seg) / SAMPLE_RATE
+                pin = getattr(asr, "pinned", None)
+                cur = pin() if callable(pin) else asr  # #1295: one model for transcribe and its pop_tail
                 try:
-                    t = asr.transcribe(seg)
+                    t = cur.transcribe(seg)
                 finally:
                     with bl_lock:
                         asr_start[0] = None
-                tail = pop_tail() if pop_tail is not None else None
+                pop_tail = getattr(cur, "pop_tail", None)
+                tail = pop_tail() if callable(pop_tail) else None
             if tail is not None and len(tail):  # #1252: a budget cut left the end of this segment undecoded:
                 # transcribe it next, before any newer segment (lost source text cannot be recovered; late is fine)
                 carry.append((tail, stamp, last_ep[0], forced_cut, pause, (t_eos, t_cut)))
