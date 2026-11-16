@@ -10,17 +10,27 @@ chrF and WER/CER per pair and overall, plus the deltas against the #745 targets.
 --run runs `python -m tlwu_eval --smoke --device cpu --no-noise --latency-jsonl` twice (the #569 eval set, see
 docs/testing.md) and writes OUT_DIR/base.json, cpu.json and the two .jsonl latency files.
 Targets (#745): p50 drop >= 30%, chrF drop <= 1.0, WER rise <= 2 points. The real numbers are printed either way.
+
+Below the table: the clips whose ASR or MT text differs between A and B. chrF / WER can only move through them; on
+the 20-clip smoke set one changed clip moves its pair's chrF by up to ~5 points (#745).
+
+Variants (#745): with --run, every {"name", "args"} entry of --variants FILE (default scripts/bench/cpu_ab_variants.json,
+not in the repo: add it on a branch, then dispatch bench-cpu-ab) is run as one more tlwu_eval and gets its own table
+against A, e.g. [{"name": "small-beam1-t4", "args": "--engine hymt2-cpu --model small --beam 1 --asr-threads 4"}].
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import statistics
 import subprocess
 import sys
 from pathlib import Path
 
+NAME_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
+VARIANTS_FILE = Path(__file__).with_name("cpu_ab_variants.json")
 TARGETS = {"p50_drop_pct_min": 30.0, "chrf_drop_max": 1.0, "wer_rise_pts_max": 2.0}
 
 
@@ -107,6 +117,64 @@ def table(a: dict, b: dict) -> str:
     return "\n".join(lines)
 
 
+def clip_diffs(rep_a: dict, rep_b: dict) -> list[dict]:
+    """Clips (matched by pair + id) whose ASR or MT text differs between two reports: {pair, id, asr, mt} with
+    asr / mt = (A text, B text) when that stage differs, else None."""
+    def index(rep):
+        out = {}
+        for lg in rep.get("languages", []):
+            for c in lg.get("clips", []):
+                key = (lg["pair"], c.get("id"))
+                if key in out:  # a repeat would hide the earlier clip's change
+                    raise ValueError(f"duplicate clip {key[0]} {key[1]} in a report")
+                out[key] = c
+        return out
+    a, b = index(rep_a), index(rep_b)
+    if set(a) != set(b):
+        raise ValueError("reports cover different clips: only in A " + (", ".join(f"{p} {i}" for p, i in sorted(set(a) - set(b), key=str)) or "-")
+                         + "; only in B " + (", ".join(f"{p} {i}" for p, i in sorted(set(b) - set(a), key=str)) or "-"))
+    out = []
+    for key in a:
+        x, y = a[key], b[key]
+        asr = (x.get("asr"), y.get("asr")) if x.get("asr") != y.get("asr") else None
+        mt = (x.get("mt"), y.get("mt")) if x.get("mt") != y.get("mt") else None
+        if asr or mt:
+            out.append({"pair": key[0], "id": key[1], "asr": asr, "mt": mt})
+    return out
+
+
+def diff_report(rep_a: dict, rep_b: dict, limit: int = 10) -> str:
+    """Count + the first `limit` clips whose text changed (chrF / WER move only through these)."""
+    n = sum(1 for lg in rep_a.get("languages", []) for _ in lg.get("clips", []))
+    d = clip_diffs(rep_a, rep_b)
+    lines = [f"clips with different ASR text: {sum(1 for x in d if x['asr'])}/{n}; "
+             f"different MT text: {sum(1 for x in d if x['mt'])}/{n}"]
+    for x in d[:limit]:
+        for stage in ("asr", "mt"):
+            if x[stage]:
+                lines.append(f"- {x['pair']} {x['id']} {stage.upper()}: {x[stage][0]!r} -> {x[stage][1]!r}")
+    return "\n".join(lines)
+
+
+def load_variants(path, required: bool = False) -> list[tuple[str, str]]:
+    """[(name, tlwu_eval args)] from a JSON list of {"name", "args"}. A missing default file = no variants; a missing
+    file the user named (required=True) is an error, so a requested sweep never silently runs only A and B."""
+    p = Path(path)
+    if not p.exists():
+        if required:
+            raise ValueError(f"{p}: variants file not found")
+        return []
+    data = json.loads(p.read_text("utf-8"))
+    if not isinstance(data, list) or not all(isinstance(v, dict) and v.get("name") and "args" in v for v in data):
+        raise ValueError(f"{p}: expected a JSON list of {{\"name\", \"args\"}}")
+    names = [str(v["name"]) for v in data]
+    if any(not NAME_RE.fullmatch(n) for n in names):  # each name is a file stem in --out-dir: no paths, no aliasing
+        raise ValueError(f"{p}: variant names must be letters, digits, '-', '_' or '.' (not starting with '.')")
+    if len(set(names)) != len(names) or {"base", "cpu"} & {n.lower() for n in names}:  # case-insensitive filesystems
+        raise ValueError(f"{p}: variant names must be unique and not 'base' / 'cpu'")
+    return [(str(v["name"]), str(v["args"])) for v in data]
+
+
 def run_eval(extra: str, data: str, out_json: Path, out_jsonl: Path, run=subprocess.run) -> None:
     """Exit 1 = the smoke wrote its report but missed its own PASS/time budget (slow CPU): the A/B table still needs
     those numbers. Any other non-zero exit, or no fresh report, is an error."""
@@ -126,13 +194,21 @@ def main(argv=None) -> int:
     p.add_argument("--out-dir", default="ab")
     p.add_argument("--base-args", default="", help="extra tlwu_eval args for the defaults run")
     p.add_argument("--cpu-args", default="", help="extra tlwu_eval args for the CPU-mode run")
+    p.add_argument("--variants", default=None,
+                   help=f"with --run: JSON list of {{name, args}}, each one more run compared with A (default: {VARIANTS_FILE} if present)")
     a = p.parse_args(argv)
     if a.run and not a.cpu_args.strip():
         p.error("--run needs --cpu-args; without it the CPU-mode run repeats the defaults run")
     d = Path(a.out_dir)
+    variants: list[tuple[str, str]] = []
     if a.run:
+        try:
+            variants = load_variants(a.variants or VARIANTS_FILE, required=a.variants is not None)
+        except (OSError, ValueError) as e:
+            print(f"cpu_mode_ab: {e}", file=sys.stderr)
+            return 2
         d.mkdir(parents=True, exist_ok=True)
-        for name, extra in (("base", a.base_args), ("cpu", a.cpu_args)):
+        for name, extra in (("base", a.base_args), ("cpu", a.cpu_args), *variants):
             (d / f"{name}.jsonl").unlink(missing_ok=True)
             try:
                 run_eval(extra, a.data, d / f"{name}.json", d / f"{name}.jsonl")
@@ -150,6 +226,16 @@ def main(argv=None) -> int:
         sa, sb = summarize(reps[0], jl[0]), summarize(reps[1], jl[1])
         check_pairs(sa, sb)
         print(table(sa, sb))
+        print()
+        print(diff_report(reps[0], reps[1]))
+        for name, _args in variants:
+            rv = json.loads((d / f"{name}.json").read_text("utf-8"))
+            sv = summarize(rv, load_jsonl(d / f"{name}.jsonl") if (d / f"{name}.jsonl").exists() else None)
+            check_pairs(sa, sv)
+            print(f"\n### variant {name} vs defaults\n")
+            print(table(sa, sv))
+            print()
+            print(diff_report(reps[0], rv))
     except (OSError, ValueError, KeyError) as e:
         print(f"cpu_mode_ab: {e}", file=sys.stderr)
         return 2
