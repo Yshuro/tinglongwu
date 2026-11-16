@@ -1,0 +1,1 @@
+{"date": "2026-11-16", "commit": "c05d291", "chrf": {"en->zh": 38.9, "ja->zh": 19.83, "ru->zh": 29.58, "zh->en": 44.88}, "mt_median_s": {"en->zh": 1.199, "ja->zh": 1.761, "ru->zh": 1.303, "zh->en": 1.123}, "asr_rtf": {"en->zh": 0.238, "ja->zh": 0.209, "ru->zh": 0.236, "zh->en": 0.183}, "peak_vram_mib": null, "hallucination": null}
