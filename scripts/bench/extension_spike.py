@@ -287,9 +287,11 @@ def main(argv=None) -> int:
         if bad:
             ap.error(f"unknown candidate(s): {bad}")
         report = run(a.data, a.asr.split(","), a.mt.split(","), a.limit)
+        report["env"]["runner"] = a.runner or "?"
         if a.out:
             a.out.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
-    report["env"]["runner"] = a.runner or report["env"].get("runner", "?")
+    if a.runner:
+        report["env"]["runner"] = a.runner
     baseline = json.loads(a.baseline.read_text(encoding="utf-8")) if a.baseline.exists() else None
     rows = summarize(report, baseline)
     md = to_markdown(rows, report["env"])
