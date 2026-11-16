@@ -175,10 +175,36 @@ class CpuMode:
     merge: bool   # merge short fragments before translating (fewer, longer MT calls)
 
 
+# #1198: in the live app Whisper and Hy-MT2 run at the same time. Before, CPU mode gave Whisper min(logical-1, 8)
+# threads while llama.cpp kept its defaults (half the logical CPUs for decoding plus ALL of them for prompt
+# processing): 8 + 8/16 busy threads on an 8-core / 16-thread Ryzen 7040, and the spinning thread pools slowed each
+# other down (owner: 7.6 s per line). bench-cpu-ab run 43814927826 (4 vCPU, Whisper busy in the background): MT
+# 8.40 s/line with the old plan, 2.92 s with this split (asr 2 / mt 2 / batch 2), 3.22 s with a physical-core
+# split (1 / 1 / 1); Whisper per clip 10.75 s -> 1.77 s. Same chrF (48.54): only the threads change.
+MT_MAX_THREADS = 8  # llama.cpp decode of a 1.8B Q4 model is memory-bound: more threads than this do not help
+
+
+@dataclass(frozen=True)
+class CpuThreads:
+    asr: int       # Whisper cpu_threads
+    mt: int        # llama.cpp n_threads (decode)
+    mt_batch: int  # llama.cpp n_threads_batch (prompt processing)
+
+
+def cpu_mode_threads(cores: int) -> CpuThreads:
+    """#1198: CPU-mode thread plan for `cores` logical CPUs. Whisper gets half, Hy-MT2 the other half for both
+    decoding and prompt processing, so the two together never ask for more threads than the CPU has."""
+    n = max(1, int(cores))
+    asr = max(1, min(n // 2, 8))
+    mt = max(1, min(n - asr, MT_MAX_THREADS))
+    return CpuThreads(asr, mt, mt)
+
+
 def cpu_mode_settings(cores: int, ram_gb: float) -> CpuMode:
-    """Speed-first ASR settings for a PC with no CUDA device. Threads leave one core for the MT engine and the GUI."""
+    """Speed-first ASR settings for a PC with no CUDA device. Threads: Whisper's half of cpu_mode_threads; the other
+    half goes to the MT engine (#1198)."""
     cores = max(1, int(cores))
-    threads = max(1, min(cores - 1, 8)) if cores > 1 else 1
+    threads = cpu_mode_threads(cores).asr
     if ram_gb < 8 or cores < 4:
         return CpuMode("base", 1, threads, True)
     if ram_gb < 16 or cores < 8:

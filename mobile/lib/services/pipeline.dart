@@ -9,7 +9,9 @@ import '../logic/context_budget.dart';
 import '../logic/device_probe.dart';
 import '../logic/draft_gate.dart';
 import '../logic/feature_prefs.dart';
+import '../logic/lang_pack.dart';
 import '../logic/phone_audio.dart';
+import '../logic/s2tw.dart';
 import '../logic/segmenter.dart';
 import '../logic/speakers.dart';
 import '../logic/subtitle_trim.dart';
@@ -188,11 +190,30 @@ class Pipeline extends ChangeNotifier {
     if (c == conversation) return;
     conversation = c;
     _clearDraftTr(); // the draft was translated for the other direction
+    _syncAsrRoute();
     final store = _conversationStore; // null until start() (and AppLog) ran
     if (store == null) return notifyListeners();
     store.save(c);
     _log.i('conversation ${c.enabled ? "on" : "off"} side=${c.side.name} foreign=${c.foreign} mine=${c.mineLang} auto=${c.auto}');
     notifyListeners();
+  }
+
+  // ---- extra-language recognizer (#556 part 2: Russian)
+
+  /// The other person's language needs a recognizer pack that is not installed (or failed to
+  /// load): the pill says so, and their lines are dropped (SenseVoice would only make garbage).
+  bool extraAsrMissing = false;
+
+  /// Tells the ASR isolate to load (only while 對話翻譯 is on with such a language, it costs
+  /// memory) or free the extra recognizer, and how to route the segments.
+  void _syncAsrRoute() {
+    final c = _activeConversation;
+    final need = c.enabled && Conversation.needsExtraAsr.contains(c.foreign);
+    final pack = need ? paths?.asrPack(c.foreign) : null;
+    extraAsrMissing = need && pack == null && paths != null;
+    _asr?.setRoute(pack == null
+        ? null
+        : AsrRoute(pack: pack, mine: c.mineLang, force: c.auto ? null : c.side == Speaker.them));
   }
 
   // ---- read-aloud (#558 part 2)
@@ -219,7 +240,7 @@ class Pipeline extends ChangeNotifier {
     final voice = paths?.ttsVoice(lang);
     ttsInstalled = voice != null;
     if (voice == null) {
-      _log.i('tts: no $lang voice (${TtsVoiceLayout.rel(lang).join(", ")}), text only');
+      _log.i('tts: no $lang voice (tts-$lang/), text only');
       _ttsLoading = null; // look again next time (the pack may be imported meanwhile)
       if (!_disposed) notifyListeners();
       return;
@@ -229,7 +250,7 @@ class Pipeline extends ChangeNotifier {
       final w = await TtsWorker.spawn(voice);
       if (_disposed) return w.dispose();
       _tts = w;
-      _log.i('tts: $lang voice ready in ${_clock.elapsedMilliseconds - t0} ms');
+      _log.i('tts: $lang voice (${voice.engine}) ready in ${_clock.elapsedMilliseconds - t0} ms');
       _speakNext();
     } catch (e) {
       ttsInstalled = false;
@@ -377,7 +398,10 @@ class Pipeline extends ChangeNotifier {
           case AsrSpeech(:final speaking):
             if (_draft.onSpeech(speaking, _clock.elapsedMilliseconds)) _refreshDraft();
           case AsrDraft(:final seg, :final text):
-            if (prefs.sourceDraft && _draft.onDraft(seg, text)) {
+            // Russian speech heard by SenseVoice is garbage: no draft for the other person then.
+            if (prefs.sourceDraft &&
+                !_activeConversation.foreignNeedsExtraAsr(e.lang) &&
+                _draft.onDraft(seg, text)) {
               _refreshDraft();
               _maybeTranslateDraft(seg, text, e.lang);
             }
@@ -385,14 +409,28 @@ class Pipeline extends ChangeNotifier {
             if (!(_benchWait?.isCompleted ?? true)) _benchWait!.complete(e);
           case AsrSegmentEnd(:final seg):
             if (_draft.onFinal(seg)) _refreshDraft();
+          case AsrExtraState(:final lang, :final error):
+            if (error == null) {
+              _log.i('asr: $lang recognizer ready');
+            } else {
+              _log.e('asr: $lang recognizer failed: $error');
+              extraAsrMissing = true;
+              if (!_disposed) notifyListeners();
+            }
           case AsrFinal():
             _draft.onFinal(e.seg);
             _refreshDraft(notify: false);
-            _onFinal(e);
+            if (extraAsrMissing && _activeConversation.foreignNeedsExtraAsr(e.lang)) {
+              _log.i('ASR final dropped (no ${_activeConversation.foreign} recognizer): lang=${e.lang}');
+              notifyListeners();
+            } else {
+              _onFinal(e);
+            }
         }
       });
       await ready.future;
       _asr!.setDraft(prefs.sourceDraft);
+      _syncAsrRoute();
       if (prefs.speakerLabels) _startSpeakers();
       _probeStore = ProbeStore('${p.filesDir}/device_probe.json');
       _log.i('ASR ready in ${_clock.elapsedMilliseconds - t0} ms');
@@ -500,6 +538,7 @@ class Pipeline extends ChangeNotifier {
         }
         await _stopMic();
         source = AudioSourceKind.phone;
+        _syncAsrRoute();
         silenceHint = false;
         _overlaySent = null;
         await PlaybackCapture.overlayStyle(overlayStyle);
@@ -507,6 +546,7 @@ class Pipeline extends ChangeNotifier {
         _log.i('source: phone audio');
       } else {
         source = AudioSourceKind.mic;
+        _syncAsrRoute();
         await _phoneSub?.cancel();
         _phoneSub = null;
         await PlaybackCapture.stop();
@@ -542,6 +582,7 @@ class Pipeline extends ChangeNotifier {
     if (_disposed || source != AudioSourceKind.phone) return;
     _log.i('phone audio stopped');
     source = AudioSourceKind.mic;
+    _syncAsrRoute();
     silenceHint = false;
     paused = false;
     PlaybackCapture.overlayHide().catchError((_) {});
@@ -843,7 +884,7 @@ class Pipeline extends ChangeNotifier {
     final sentences = SentenceSegmenter.split(f.text);
     final route = _activeConversation.route(f.lang, listenTarget: target);
     for (final text in sentences.isEmpty ? [f.text] : sentences) {
-      final sub = Subtitle(text, speaker: route.speaker, seg: f.seg);
+      final sub = Subtitle(displayOriginal(text, f.lang), speaker: route.speaker, seg: f.seg);
       sub.voice = _voiceBySeg[f.seg] ?? 0;
       subtitles.add(sub);
       _queue.add(_Job(text, sub, speechEnd, now, route));
@@ -866,7 +907,7 @@ class Pipeline extends ChangeNotifier {
       final a = jobs[i];
       final b = jobs[i + 1];
       b.ru = ContextBudget.join(a.ru, b.ru);
-      b.sub.ru = b.ru;
+      b.sub.ru = displayOriginal(b.ru, b.lang);
       subtitles.remove(a.sub);
       final merged = _Job(b.ru, b.sub, a.speechEndMs, b.asrFinalMs, b.route);
       jobs

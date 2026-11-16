@@ -2,6 +2,13 @@
 
 [繁體中文](PRIVACY.zh-TW.md)
 
+<p align="center"><img src="assets/docs/privacy-split.en.svg" alt="Stays on your PC: audio, transcripts, settings, models. Network only when you act: setup downloads, installers, update check, report buttons. No telemetry." width="720"></p>
+
+Your voice and text never leave your PC; the network is used only for the steps you start yourself.
+
+<details>
+<summary>Full text</summary>
+
 tinglongWu translates speech on your own computer. This page says what stays local and every case where the network is used. It describes the code in this repository; it is not a legal guarantee (see "Limits").
 
 ## What stays on your machine
@@ -21,7 +28,7 @@ The runtime package `tinglongwu/` contains no network code; a Python-level netwo
 | 3 | Python dependencies: PyPI, plus a third-party index for the llama-cpp wheel (`requirements-llama-cuda.txt`) | `install.ps1`, `tlwu-setup --deps`, `mac_install.sh`, auto-update when requirements change | Ordinary HTTPS requests | Do not run the installers |
 | 4 | Opt-in auto-update: `git fetch` of the `main` branch on GitHub (6 s cap); may run `pip install -e .` if requirements changed | Asked once, default off | Git protocol requests | Answer no, or set `TLWU_NO_UPDATE=1` |
 | 4b | Windows setup-wizard update check (`tinglongwu_setup/selfupdate.py`, run as a child of the GUI): GitHub API `releases/latest` (6 s cap), then, only when there is a newer version, the release's `SHA256SUMS.txt` and `tinglongwu-setup.exe` from GitHub (SHA256-checked before it runs) | Once a day at GUI start if *Update automatically* was ticked in setup (stored as `auto_update=1`); otherwise only when you click **Check for updates** | Ordinary HTTPS requests (your IP, user agent); nothing about you or your usage | Untick *Update automatically* (setup or ⚙ Adjust), or set `TLWU_OFFLINE=1` (no request at all) |
-| 4c | Windows GPU pack download (`tlwu-setup --gpu-pack`, `tinglongwu_setup/gpu_pack.py`): the release's `tinglongwu-gpu-pack.zip` (cuBLAS / cuDNN DLLs) and its `.manifest.json` from GitHub Releases (size + SHA256 checked before unpacking). Vulkan pack (`tlwu-setup --vulkan-pack`, `tinglongwu_setup/vulkan_pack.py`): the release's `tlwu-vulkan-pack-<version>.zip`, checked against the release's `SHA256SUMS.txt` before unpacking | Only when you run `tlwu-setup --gpu-pack` / `--vulkan-pack` or the GPU step in setup | Ordinary HTTPS requests (your IP, user agent, the requested file) | Do not run them; the CPU path keeps working |
+| 4c | Windows GPU pack download (`tlwu-setup --gpu-pack`, `tinglongwu_setup/gpu_pack.py`): the release's `tinglongwu-gpu-pack.zip` (cuBLAS / cuDNN DLLs) and its `.manifest.json` from GitHub Releases (size + SHA256 checked before unpacking). Vulkan pack (`tlwu-setup --vulkan-pack`, `tinglongwu_setup/vulkan_pack.py`): the release's `tlwu-vulkan-pack-<version>.zip` (Linux: `tlwu-vulkan-pack-linux-<version>.zip`), checked against the release's `SHA256SUMS.txt` before unpacking | Only when you run `tlwu-setup --gpu-pack` / `--vulkan-pack` or the GPU step in setup | Ordinary HTTPS requests (your IP, user agent, the requested file) | Do not run them; the CPU path keeps working |
 | 5 | Installers fetching the source: Windows setup wizard `tinglongwu-setup.exe` (bundles the source; `install.ps1` then downloads Python 3.12 from python.org if missing, SHA256-checked, and the Python packages); Windows `scripts/bootstrap_windows.ps1` (git clone from GitHub, or the GitHub zip of the tag when git is missing); Linux `scripts/install.sh` (`curl \| bash` from the GitHub release, then git clone); macOS `mac_install.sh` (`curl \| bash` from the GitHub release, git clone, Homebrew) | When you run it | Ordinary HTTPS requests | Do not run it |
 | 6 | Network-guard report (`tinglongwu/netreport.py`): opens your browser on a pre-filled GitHub issue | Only if a connection was blocked and you answer y; the exact text is shown first and you submit it yourself | Version, commit, OS string, host/port/package/mode/count, up to 12 `module:function:line` stack frames. No transcript, username, home path or hostname | Answer N |
 | 6b | Report a problem (GUI button / `tlwu --report`, `tinglongwu/report.py`): opens your browser on a pre-filled GitHub issue | Only when you click it; you review the text on GitHub and submit it yourself | App version, OS, Python, CPU model/AVX, cores, RAM, GPU/VRAM, NVIDIA driver, package versions, current settings (GUI) or language pair/engine (CLI), the last install self-test block, up to the last 200 run-log lines (cut to fit the URL); home path and user name are redacted | Do not click it |
@@ -51,3 +58,5 @@ Paid versions: checkout (email, license key, card data) is handled entirely by t
 
 ## Contact
 Privacy questions: open an issue at https://github.com/sunososobro-hub/tinglongwu/issues, or report sensitive matters privately as described in [SECURITY.md](SECURITY.md).
+
+</details>

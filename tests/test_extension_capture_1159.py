@@ -60,7 +60,7 @@ def _tone_wav(path: Path):
 def test_manifest_permissions_are_tab_capture_and_offscreen_only():
     m = json.loads((EXT / "manifest.json").read_text("utf-8"))
     assert m["manifest_version"] == 3
-    assert sorted(m["permissions"]) == ["offscreen", "tabCapture"]
+    assert sorted(m["permissions"]) == ["offscreen", "storage", "tabCapture"]
     for key in ("host_permissions", "optional_host_permissions", "optional_permissions", "externally_connectable",
                 "web_accessible_resources"):
         assert key not in m, key

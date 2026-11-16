@@ -6,12 +6,12 @@ from tinglongwu.hwprobe import CpuMode, cpu_mode_settings, too_heavy
 
 
 @pytest.mark.parametrize("cores,ram,expected", [
-    (4, 8, CpuMode("small", 1, 3, True)),
-    (4, 16, CpuMode("small", 1, 3, True)),
-    (4, 32, CpuMode("small", 1, 3, True)),
-    (8, 8, CpuMode("small", 1, 7, True)),
-    (8, 16, CpuMode("small", 2, 7, False)),
-    (8, 32, CpuMode("small", 2, 7, False)),
+    (4, 8, CpuMode("small", 1, 2, True)),
+    (4, 16, CpuMode("small", 1, 2, True)),
+    (4, 32, CpuMode("small", 1, 2, True)),
+    (8, 8, CpuMode("small", 1, 4, True)),
+    (8, 16, CpuMode("small", 2, 4, False)),
+    (8, 32, CpuMode("small", 2, 4, False)),
     (16, 8, CpuMode("small", 1, 8, True)),
     (16, 16, CpuMode("small", 2, 8, False)),
     (16, 32, CpuMode("small", 2, 8, False)),
@@ -68,7 +68,7 @@ def test_apply_cpu_mode_lowers_auto_model_and_sets_beam_threads(tmp_path, monkey
     monkeypatch.setattr("tinglongwu.models.whisper_installed", lambda mdir=None: {"small", "medium"})
     a = SimpleNamespace(model="medium", quality="auto")
     st = cli.apply_cpu_mode(a, "cpu", tmp_path, explicit_model=False, cores=8, ram_gb=8)
-    assert (a.model, a.cpu_beam, a.cpu_threads, st.size) == ("small", 1, 7, "small")
+    assert (a.model, a.cpu_beam, a.cpu_threads, st.size) == ("small", 1, 4, "small")
 
 
 def test_apply_cpu_mode_keeps_explicit_model_and_env_threads(tmp_path, monkeypatch):
@@ -111,7 +111,7 @@ def test_cuda_fallback_gets_cpu_policy(monkeypatch):
     from tinglongwu.asr import cpu_fallback_settings
 
     monkeypatch.delenv("TLWU_CPU_THREADS", raising=False)
-    assert cpu_fallback_settings(None, None, cores=8, ram_mib=8 * 1024) == (1, 7)  # not the old beam 5 / default threads
+    assert cpu_fallback_settings(None, None, cores=8, ram_mib=8 * 1024) == (1, 4)  # not the old beam 5 / default threads
     assert cpu_fallback_settings(2, 3, cores=8, ram_mib=8 * 1024) == (2, 3)  # values from the CPU policy win
     monkeypatch.setenv("TLWU_CPU_THREADS", "2")
     assert cpu_fallback_settings(None, None, cores=8, ram_mib=32 * 1024)[1] == 2
@@ -137,3 +137,77 @@ def test_cpu_on_work_reports_mt_ms_and_keeps_slowwatch():
     assert cli.cpu_on_work(None, None) is None  # no GUI, no SlowWatch (GPU or --file): unchanged
     watch = lambda a, m, s: None  # noqa: E731
     assert cli.cpu_on_work(watch, None) is watch
+
+
+# #1198: Whisper and Hy-MT2 run at the same time in the live app. On an 8-core / 16-thread laptop CPU mode used to
+# give Whisper 8 threads and llama.cpp 8 decode + 16 prompt threads: 24 busy threads on 16 CPUs.
+@pytest.mark.parametrize("cores", [1, 2, 3, 4, 6, 8, 12, 16, 32])
+def test_cpu_mode_threads_never_oversubscribe(cores):
+    from tinglongwu.hwprobe import cpu_mode_threads
+
+    t = cpu_mode_threads(cores)
+    assert t.asr >= 1 and t.mt >= 1 and t.mt_batch == t.mt
+    assert cores == 1 or t.asr + t.mt <= cores
+    assert t.asr == cpu_mode_settings(cores, 16).threads
+
+
+def test_apply_cpu_mode_hands_mt_threads_to_llama(tmp_path, monkeypatch):
+    """Ryzen 7040 shape (16 logical CPUs): llama.cpp gets 8 decode / 8 prompt threads (was 8 / 16), Whisper 8."""
+    from types import SimpleNamespace
+    from tinglongwu import cli, threads
+
+    monkeypatch.delenv("TLWU_CPU_THREADS", raising=False)
+    monkeypatch.delenv("TLWU_BOTH", raising=False)
+    monkeypatch.setattr(threads, "_role", "listen")
+    monkeypatch.setattr(threads.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr("tinglongwu.models.whisper_installed", lambda mdir=None: {"small"})
+    a = SimpleNamespace(model="small", quality="auto", min_words=0, min_words_explicit=True)
+    assert (threads.current()["mt"], threads.current()["mt_batch"]) == (8, 16)  # llama.cpp defaults before
+    cli.apply_cpu_mode(a, "cpu", tmp_path, explicit_model=True, cores=16, ram_gb=16)
+    t = threads.current()
+    assert (t["mt"], t["mt_batch"]) == (8, 8)
+    assert a.cpu_threads + t["mt"] <= 16 and a.cpu_threads + t["mt_batch"] <= 16
+
+
+def test_cpu_mode_mt_threads_cleared_on_gpu_and_ignored_in_listen_speak(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from tinglongwu import cli, threads
+
+    monkeypatch.delenv("TLWU_CPU_THREADS", raising=False)
+    monkeypatch.setattr(threads, "_role", "listen")
+    monkeypatch.setattr(threads.os, "cpu_count", lambda: 4)
+    monkeypatch.setattr("tinglongwu.models.whisper_installed", lambda mdir=None: {"small"})
+    a = SimpleNamespace(model="small", quality="auto", min_words=0, min_words_explicit=True)
+    cli.apply_cpu_mode(a, "cpu", tmp_path, explicit_model=True, cores=4, ram_gb=16)
+    assert (threads.current()["mt"], threads.current()["mt_batch"]) == (2, 2)
+    monkeypatch.setenv("TLWU_BOTH", "1")  # listen+speak keeps the #250 split
+    assert threads.current()["mt"] == threads.split(4)["listen"]["mt"]
+    monkeypatch.delenv("TLWU_BOTH")
+    cli.apply_cpu_mode(SimpleNamespace(model="large-v3", quality="auto"), "cuda", tmp_path, explicit_model=False)
+    assert (threads.current()["mt"], threads.current()["mt_batch"]) == (2, 4)  # llama.cpp defaults again
+
+
+def test_cuda_to_cpu_fallback_gets_cpu_mode_mt_threads(monkeypatch):
+    from tinglongwu import cli, threads
+
+    monkeypatch.delenv("TLWU_BOTH", raising=False)
+    monkeypatch.setattr(threads, "_role", "listen")
+    monkeypatch.setattr(threads.os, "cpu_count", lambda: 4)
+    assert not cli.cpu_fallback_mt("cuda", "cuda", cores=4) and not cli.cpu_fallback_mt("cpu", "cpu", cores=4)
+    assert (threads.current()["mt"], threads.current()["mt_batch"]) == (2, 4)
+    assert cli.cpu_fallback_mt("cuda", "cpu", cores=4)
+    assert (threads.current()["mt"], threads.current()["mt_batch"]) == (2, 2)
+
+
+def test_eval_defaults_run_after_cpu_mode_run_clears_mt_threads(monkeypatch):
+    from types import SimpleNamespace
+    from tinglongwu import threads
+    from tlwu_eval.__main__ import cpu_mode_asr
+
+    monkeypatch.delenv("TLWU_BOTH", raising=False)
+    monkeypatch.setattr(threads, "_role", "listen")
+    monkeypatch.setattr(threads.os, "cpu_count", lambda: 4)
+    cpu_mode_asr(SimpleNamespace(cpu_mode=True, model=None), "cpu", "small", cores=4, ram_gb=16)
+    assert threads.current()["mt_batch"] == 2
+    cpu_mode_asr(SimpleNamespace(cpu_mode=False, model=None), "cpu", "small", cores=4, ram_gb=16)
+    assert threads.current()["mt_batch"] == 4  # llama.cpp default again for the baseline run

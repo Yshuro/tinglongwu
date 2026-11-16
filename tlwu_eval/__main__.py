@@ -52,8 +52,46 @@ def real_engines(a) -> Engines:
     mdir = models_dir(a.models_dir)
     dev = resolve_device(a.device)
     model = a.model or pick_whisper("small", mdir)
-    return Engines(load_asr=lambda lang: FasterWhisperRecognizer(mdir, model, lang, dev),
+    model, beam, threads = cpu_mode_asr(a, dev, model)
+    beam, threads = asr_overrides(a, beam, threads)
+    return Engines(load_asr=lambda lang: FasterWhisperRecognizer(mdir, model, lang, dev, beam=beam, threads=threads),
                    load_mt=lambda: cli.make_translator(a.engine, mdir, "tw", dev))
+
+
+def cpu_mode_asr(a, dev: str, model: str, cores=None, ram_gb=None):
+    """#781: (model, beam, threads) for the ASR. Without --cpu-mode, or off the CPU: (model, None, None), the
+    recognizer defaults (beam 5). With --cpu-mode on the CPU: hwprobe.cpu_mode_settings for this PC, like tlwu
+    (#780): beam / threads from the policy; the model is lowered to the policy size unless --model was given."""
+    from tinglongwu import threads as thread_budget
+
+    if not getattr(a, "cpu_mode", False) or dev != "cpu":
+        thread_budget.set_cpu_mode(None)  # #1198: a defaults run after a CPU-mode run in one process: llama.cpp defaults
+        return model, None, None
+    from tinglongwu.hwprobe import cpu_mode_settings, cpu_mode_threads, ram_mib
+
+    if ram_gb is None:
+        mib = ram_mib()
+        ram_gb = mib / 1024 if mib else 16.0
+    n = cores or os.cpu_count() or 4
+    st = cpu_mode_settings(n, ram_gb)
+    plan = cpu_mode_threads(n)
+    thread_budget.set_cpu_mode(plan.mt, plan.mt_batch)  # #1198: the MT engine gets CPU mode's threads too, like tlwu
+    order = ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"]
+    if not a.model and model in order and order.index(model) > order.index(st.size):
+        model = st.size
+    print(f"tlwu-eval: CPU mode: model {model}, beam {st.beam}, threads {st.threads}, "
+          f"mt threads {plan.mt}/{plan.mt_batch}", file=sys.stderr)
+    return model, st.beam, st.threads
+
+
+def asr_overrides(a, beam, threads):
+    """#745: explicit --beam / --asr-threads win over the defaults and the --cpu-mode policy (CPU only: the recognizer
+    ignores them on CUDA). Lets scripts/bench/cpu_mode_ab.py variants try one knob at a time."""
+    beam = getattr(a, "beam", None) or beam
+    threads = getattr(a, "asr_threads", None) or threads
+    if getattr(a, "beam", None) or getattr(a, "asr_threads", None):
+        print(f"tlwu-eval: ASR override: beam {beam or 'default'}, threads {threads or 'default'}", file=sys.stderr)
+    return beam, threads
 
 
 def machine_totals():
@@ -137,6 +175,12 @@ def main(argv=None, engines: Engines | None = None, totals=None, comet_model=Non
     p.add_argument("--history", metavar="FILE.jsonl",
                    help="with --smoke: append one JSON line (date, commit, chrF/MT/ASR per pair, VRAM, hallucinations) (#123)")
     p.add_argument("--trend", metavar="FILE.jsonl", help="draw trend charts from a --history file into --out (default trend.html) (#123)")
+    p.add_argument("--cpu-mode", action="store_true",
+                   help="#781: with --device cpu, use the #780 CPU-mode ASR settings (beam / threads / size) like tlwu")
+    p.add_argument("--beam", type=int, default=None, metavar="N",
+                   help="#745: Whisper beam size on the CPU (overrides the default 5 and --cpu-mode)")
+    p.add_argument("--asr-threads", type=int, default=None, metavar="N",
+                   help="#745: Whisper CPU threads (overrides the default and --cpu-mode)")
     p.add_argument("--text-cases", metavar="FILE.jsonl",
                    help="MT-only chrF over text cases such as eval/user_cases.jsonl, per pair and per case (#827)")
     a = p.parse_args(argv)

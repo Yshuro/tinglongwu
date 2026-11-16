@@ -53,6 +53,9 @@ def parse_args(argv=None):
                    help="with --lang-candidates: write the last detected en/ru here (read by "
                         "`python -m tinglongwu.reverse.proto --to follow`); default off")
     p.add_argument("--to", default="zh", help="target language code (default zh)")
+    p.add_argument("--face-to-face", default=None, metavar="PARTNER_LANG",
+                   help="#1164: one mic, my language is --to; each utterance goes mine -> partner or partner -> mine "
+                        "by its detected language")
     p.add_argument("--zh-variant", choices=["tw", "cn"], default="tw",
                    help="Chinese output: tw = Traditional (OpenCC s2twp), cn = Simplified")
     p.add_argument("--preset", choices=sorted(PRESETS), default=None,
@@ -194,6 +197,8 @@ def parse_args(argv=None):
             p.error(f"--topics: model file not found: {a.topics}")
     if a.voice and a.transcript_only:
         p.error("--voice needs translations (not --transcript-only)")
+    if a.face_to_face and (a.voice or a.stream):  # #1204: TTS language and drafts are fixed to --to, not per utterance
+        p.error("--face-to-face cannot be combined with --voice or --stream (the target changes per utterance)")
     if (a.voice_device is not None or a.voice_speaker is not None) and not a.voice:
         p.error("--voice-device / --voice-speaker need --voice")
     a.voice_speaker = 0 if a.voice_speaker is None else a.voice_speaker
@@ -321,7 +326,11 @@ def make_translator(engine: str, mdir, zh_variant: str, dev: str, say=print, cho
             raise SystemExit(f"tlwu: Hy-MT2 failed to load on {dev}: {str(e)[:200]}. Repair it with "
                              f"`tlwu-setup {flag}` (and `pip install -r requirements-llama-cpu.txt` on a CPU-only "
                              "PC).") from e
-        say(f"tlwu: translation engine = {name} on {dev} ({why})", file=sys.stderr)
+        from .hymt import active_path
+
+        on = active_path(tr)  # #1198: the backend the model really loaded on (Vulkan when dev is cpu, CPU fallback)
+        say(f"tlwu: translation engine = {name} on {on[0] if on else dev}"
+            + (f", {on[1]} threads" if on and on[0] == "cpu" and on[1] else "") + f" ({why})", file=sys.stderr)
         return tr
     raise SystemExit(f"tlwu: unknown translation engine {name!r}; use --engine auto (#471)")
 
@@ -444,17 +453,25 @@ def listen_segmenter(a) -> Segmenter:
 def apply_cpu_mode(a, dev: str, mdir, explicit_model: bool, cores=None, ram_gb=None):
     """#780: on the CPU, apply hwprobe.cpu_mode_settings. Explicit user choices win: an explicit --model is kept, an
     auto-picked model is lowered to the policy size when that is downloaded, TLWU_CPU_THREADS is kept. beam / threads
-    go to the recognizer via a.cpu_beam / a.cpu_threads. merge=True raises an unset --min-words to the meeting value (3); an explicit --min-words wins.
+    go to the recognizer via a.cpu_beam / a.cpu_threads; the MT engine's llama.cpp threads go to threads.set_cpu_mode
+    (#1198). merge=True raises an unset --min-words to the meeting value (3); an explicit --min-words wins.
     Returns the CpuMode (None when not on the CPU)."""
+    from . import threads as thread_budget
+
     if dev != "cpu":
+        thread_budget.set_cpu_mode(None)  # a GPU run after a CPU run in the same GUI process: llama.cpp defaults
         return None
-    from .hwprobe import ram_mib, cpu_mode_settings
+    from .hwprobe import cpu_mode_threads, ram_mib, cpu_mode_settings
     from .models import whisper_installed
 
     if ram_gb is None:
         mib = ram_mib()
         ram_gb = mib / 1024 if mib else 16.0  # unknown RAM: the middle tier
-    st = cpu_mode_settings(cores or os.cpu_count() or 4, ram_gb)
+    n = cores or os.cpu_count() or 4
+    st = cpu_mode_settings(n, ram_gb)
+    plan = cpu_mode_threads(n)  # #1198: Whisper + Hy-MT2 together never ask for more threads than the CPU has
+    thread_budget.set_cpu_mode(plan.mt, plan.mt_batch)
+    print(f"tlwu: CPU mode threads: {n} CPUs -> asr={st.threads} mt={plan.mt}/{plan.mt_batch}", file=sys.stderr)
     order = ["tiny", "base", "small", "medium", "large-v3-turbo", "large-v3"]
     if (not explicit_model and getattr(a, "quality", "auto") == "auto" and a.model in order
             and order.index(a.model) > order.index(st.size) and st.size in whisper_installed(mdir)):
@@ -467,6 +484,19 @@ def apply_cpu_mode(a, dev: str, mdir, explicit_model: bool, cores=None, ram_gb=N
     return st
 
 
+def cpu_fallback_mt(asked: str, got: str, cores=None) -> bool:
+    """#1198: Whisper fell back from CUDA to the CPU after apply_cpu_mode ran for CUDA: give the MT engine (built
+    next) the CPU-mode llama.cpp threads too. True when it did."""
+    if asked == "cpu" or got != "cpu":
+        return False
+    from . import threads as thread_budget
+    from .hwprobe import cpu_mode_threads
+
+    plan = cpu_mode_threads(cores or os.cpu_count() or 4)
+    thread_budget.set_cpu_mode(plan.mt, plan.mt_batch)
+    return True
+
+
 def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice=None, cpu_line=None,
                 labeler_factory=None, on_topic=None) -> None:
     """Load models and run the pipeline for parsed args `a`. Shared by the CLI and the GUI.
@@ -474,7 +504,8 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
     sink: base sink (default: text on stdout); draft_factory(asr, translator, segmenter, tgt) -> draft engine
     or None; stop: threading.Event that ends the run; status(str): progress notes (GUI);
     notice(str): a note that should stay visible (GUI), e.g. why the GPU is not used;
-    cpu_line(mt_ms): #780, CPU only, called once per output line with the translation time in ms (GUI status);
+    cpu_line(mt_ms, path): #780, CPU only, called once per output line with the translation time in ms and
+    (#1198) path = (backend, threads) of the MT model or None (GUI status);
     on_topic(topic): #611, with --topics: called on the summarizer thread with each finished topics.Topic (GUI panel)."""
     from .asr import FasterWhisperRecognizer
     from .device import resolve_device
@@ -506,7 +537,9 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
         from .i18n import t
 
         why = warned[0].removeprefix("tlwu: ") if warned else t("gpu_none")
-        notice(t("gpu_fallback", why=why) + " | " + t("gui_cpu_mode"))  # #780: CPU mode shown with the reason
+        # #780: CPU mode shown with the reason. #1241: one line, and gpu_fallback already says "CPU mode", so the
+        # gui_cpu_mode text is not appended again (the status line carries it with the per-line MT ms)
+        notice(" ".join(t("gpu_fallback", why=why).split()))
     elif notice is not None and dev == "cpu":
         from .i18n import t
 
@@ -527,7 +560,21 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
         print(f"tlwu: glossary (with built-in tech terms) = {len(glossary.entries)} entries", file=sys.stderr)
     prog.stage("speech model")
     cands = None
-    if a.lang == "auto" and getattr(a, "lang_candidates", None):
+    f2f_route = None
+    if getattr(a, "face_to_face", None):
+        from . import face_to_face as f2f
+
+        cands = f2f.candidates(a.to, a.face_to_face)  # raises SameLanguageError when both sides match
+        a.lang = "auto"
+        from .gui.core import lang_base
+
+        for side in (a.to, a.face_to_face):  # #1204: the zh side picks the Chinese variant (zh-cn -> cn, zh-tw -> tw)
+            if side in ("zh-tw", "zh-cn"):
+                a.zh_variant = side[3:]
+        # #1204: MT knows "zh", not "zh-tw"/"zh-cn" (the variant is the translator's zh_variant)
+        f2f_route = lambda lang: lang_base(f2f.route(a.to, a.face_to_face, lang)["target"])  # noqa: E731
+        print(f"tlwu: face-to-face {a.to} <-> {a.face_to_face}", file=sys.stderr)
+    elif a.lang == "auto" and getattr(a, "lang_candidates", None):
         from .langfollow import parse_candidates
 
         cands = parse_candidates(a.lang_candidates)
@@ -535,6 +582,7 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
     asr = FasterWhisperRecognizer(mdir, a.model, a.lang, dev, glossary=glossary,
                                   candidates=cands, lang_file=getattr(a, "lang_file", None),
                                   beam=getattr(a, "cpu_beam", None), threads=getattr(a, "cpu_threads", None))
+    cpu_fallback_mt(dev, asr.device)  # #1198: a CUDA load that fell back to the CPU gets CPU mode's MT threads
     dev = asr.device  # may have fallen back to cpu
     asr.live = dev == "cpu" and not a.file  # #251: live CPU listening caps ASR retries and time per sentence
     cpu_max_wait(a, dev)
@@ -548,6 +596,9 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
             apply_glossary(translator, glossary)
         if a.lang != "auto":
             translator.preload(a.lang, a.to)
+        elif f2f_route is not None:  # #1204: both directions of the face-to-face pair, bases only (zh, not zh-tw)
+            translator.preload(cands[0], cands[1])
+            translator.preload(cands[1], cands[0])
         elif cands:  # fail early on missing models; the translator caches one step per language pair
             for c in cands:
                 if c != a.to:
@@ -666,8 +717,9 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
         run(source, segmenter, asr, translator, sink, a.to, merger, audio_clock=audio_clock, draft=draft,
             stop_event=stop, log=lat, on_latency=ctl.observe if ctl else None,
             speakers=labeler, on_work=cpu_on_work(None if (dev != "cpu" or a.file) else SlowWatch(say=warn).observe,
-                                                  cpu_line if dev == "cpu" else None),
-            on_record=on_record, recorder=recorder, seg_gate=seg_gate)
+                                                  cpu_line if dev == "cpu" else None,
+                                                  lambda: active_mt_path(translator)),
+            on_record=on_record, recorder=recorder, seg_gate=seg_gate, route=f2f_route)
     except KeyboardInterrupt:
         interrupted = True
         raise
@@ -682,16 +734,27 @@ def run_session(a, sink=None, draft_factory=None, stop=None, status=None, notice
             close_voice(drop=interrupted or (stop is not None and stop.is_set()))
 
 
-def cpu_on_work(observe, cpu_line):
-    """#780: on_work callback that also reports the per-line MT time (ms) to cpu_line; either part may be None."""
+def cpu_on_work(observe, cpu_line, path=None):
+    """#780: on_work callback that also reports the per-line MT time (ms) to cpu_line; either part may be None.
+    path (#1198): callable -> (backend, threads) of the MT model or None; cpu_line then gets (ms, path)."""
     if cpu_line is None:
         return observe
 
     def on_work(asr_s, mt_s, seg_s):
         if observe is not None:
             observe(asr_s, mt_s, seg_s)
-        cpu_line(mt_s * 1000.0)
+        if path is None:
+            cpu_line(mt_s * 1000.0)
+        else:
+            cpu_line(mt_s * 1000.0, path())
     return on_work
+
+
+def active_mt_path(translator):
+    """#1198: (backend, threads) the Hy-MT2 model runs on, or None (other engine, not loaded, --transcript-only)."""
+    from .hymt import active_path
+
+    return active_path(translator) if translator is not None else None
 
 
 def latency_recorder(path, log):

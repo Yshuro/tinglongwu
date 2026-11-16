@@ -128,6 +128,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_ready_listen": "Ready - start playback now",
         "gui_cpu_mode": "CPU mode (no NVIDIA GPU): settings chosen for speed",
         "gui_cpu_mt_ms": "MT {ms} ms per line",
+        "gui_mt_path_cpu": "Hy-MT2 on CPU, {n} threads",  # #1198
+        "gui_mt_path_cpu_plain": "Hy-MT2 on CPU",  # #1198
+        "gui_mt_path_gpu": "Hy-MT2 on GPU ({api})",  # #1198
         "gui_ready_speak": "Ready - speak now",
         "gui_quick_both": "Start (listen + speak)",
         "gui_ready_both": "Ready - play the video or speak",
@@ -147,7 +150,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_dark": "Dark theme",
         "mt_untranslated": "[not translated]",
         "mt_pair_missing": "[no {src} -> {tgt} translation model installed: run tlwu-setup]",
-        "gpu_fallback": "GPU cannot be used; running in CPU mode (translation is slower).\nReason: {why}",
+        "gpu_fallback": "GPU cannot be used; running in CPU mode (translation is slower). Reason: {why}",
         "gpu_none": "no usable NVIDIA GPU was found.",
         "menu_glossary_on": "Glossary: {n} file(s) from {dir}",
         "menu_cpu_mt_hymt": "Translation engine: Hy-MT2 on CPU (slower; lines may arrive later).",
@@ -355,6 +358,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_ready_listen": "Готово - включите воспроизведение",
         "gui_cpu_mode": "Режим CPU (нет NVIDIA GPU): настройки для скорости",
         "gui_cpu_mt_ms": "MT {ms} мс на строку",
+        "gui_mt_path_cpu": "Hy-MT2 на CPU, потоков: {n}",  # #1198
+        "gui_mt_path_cpu_plain": "Hy-MT2 на CPU",  # #1198
+        "gui_mt_path_gpu": "Hy-MT2 на GPU ({api})",  # #1198
         "gui_ready_speak": "Готово - говорите",
         "gui_quick_both": "Старт (слушать + говорить)",
         "gui_ready_both": "Готово - включите видео или говорите",
@@ -374,7 +380,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_dark": "Тёмная тема",
         "mt_untranslated": "[не переведено]",
         "mt_pair_missing": "[модель перевода {src} -> {tgt} не установлена: запустите tlwu-setup]",
-        "gpu_fallback": "GPU недоступен; работаем на CPU (перевод медленнее).\nПричина: {why}",
+        "gpu_fallback": "GPU недоступен; работаем на CPU (перевод медленнее). Причина: {why}",
         "gpu_none": "подходящая видеокарта NVIDIA не найдена.",
         "menu_glossary_on": "Глоссарий: файлов {n} из {dir}",
         "menu_cpu_mt_hymt": "Движок перевода: Hy-MT2 на CPU (медленнее; строки могут приходить позже).",
@@ -582,6 +588,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_ready_listen": "就緒 - 現在開始播放",
         "gui_cpu_mode": "CPU 模式（沒有 NVIDIA 顯示卡）：已自動選擇偏重速度的設定",
         "gui_cpu_mt_ms": "翻譯每行 {ms} 毫秒",
+        "gui_mt_path_cpu": "Hy-MT2 在 CPU 上跑，{n} 執行緒",  # #1198
+        "gui_mt_path_cpu_plain": "Hy-MT2 在 CPU 上跑",  # #1198
+        "gui_mt_path_gpu": "Hy-MT2 在顯示卡上跑（{api}）",  # #1198
         "gui_ready_speak": "就緒 - 現在可以說話",
         "gui_quick_both": "開始（聽＋說）",
         "gui_ready_both": "就緒 - 播放影片或直接說話",
@@ -601,7 +610,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_dark": "深色主題",
         "mt_untranslated": "[未能翻譯]",
         "mt_pair_missing": "[尚未安裝 {src} -> {tgt} 翻譯模型：請執行 tlwu-setup]",
-        "gpu_fallback": "GPU 無法使用，已自動改用 CPU 模式（翻譯會比較慢）。\n原因：{why}",
+        "gpu_fallback": "GPU 無法使用，已自動改用 CPU 模式（翻譯會比較慢）。原因：{why}",
         "gpu_none": "沒有偵測到可用的 NVIDIA 顯示卡。",
         "menu_glossary_on": "詞彙表：{dir} 共 {n} 個檔案",
         "menu_cpu_mt_hymt": "翻譯引擎：Hy-MT2（CPU，較慢，字幕可能晚一點出現）。",
@@ -809,6 +818,9 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_ready_listen": "準備完了 - 再生を始めてください",
         "gui_cpu_mode": "CPU モード（NVIDIA GPU なし）: 速度重視の設定",
         "gui_cpu_mt_ms": "翻訳 1 行あたり {ms} ms",
+        "gui_mt_path_cpu": "Hy-MT2 は CPU、{n} スレッド",  # #1198
+        "gui_mt_path_cpu_plain": "Hy-MT2 は CPU",  # #1198
+        "gui_mt_path_gpu": "Hy-MT2 は GPU（{api}）",  # #1198
         "gui_ready_speak": "準備完了 - 話してください",
         "gui_quick_both": "スタート（聞く＋話す）",
         "gui_ready_both": "準備完了 - 動画を再生するか、話してください",
@@ -828,7 +840,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_dark": "ダークテーマ",
         "mt_untranslated": "[未翻訳]",
         "mt_pair_missing": "[{src} -> {tgt} の翻訳モデルがインストールされていません: tlwu-setup を実行してください]",
-        "gpu_fallback": "GPU を使えないため、CPU モードで動作します（翻訳が遅くなります）。\n理由: {why}",
+        "gpu_fallback": "GPU を使えないため、CPU モードで動作します（翻訳が遅くなります）。理由: {why}",
         "gpu_none": "使用できる NVIDIA GPU が見つかりませんでした。",
         "menu_glossary_on": "用語集: {dir} から {n} 個のファイル",
         "menu_cpu_mt_hymt": "翻訳エンジン: CPU 上の Hy-MT2（遅め。行が遅れて届くことがあります）。",

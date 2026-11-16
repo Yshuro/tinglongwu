@@ -129,6 +129,8 @@ def load_llama(path: Path, gpu: bool):
         except (ImportError, OSError, RuntimeError) as e2:
             raise RuntimeError(f"Hy-MT2 needs llama-cpp-python: {e2}. "
                                f"To fix: {llamacheck.FIX_HINT}") from e2
+    if backend == "cuda" and llamacheck.cpu_fallback:  # #1198: the bundled CPU build loaded: load and report it as CPU
+        backend = mt_backend.last_backend = "cpu"
     if sys.platform == "win32":
         lib = Path(llama_cpp.__file__).parent / "lib"
         if lib.is_dir():
@@ -145,6 +147,7 @@ def load_llama(path: Path, gpu: bool):
                          n_threads=t["mt"], n_threads_batch=t["mt_batch"], verbose=False)
 
         model, mt_backend.last_backend = mt_backend.load_with_fallback(path, backend, make)  # #746
+        mt_backend.last_threads = t["mt"]
         return model
     except OSError as e:
         err = llamacheck.explain(e)
@@ -160,6 +163,7 @@ class SharedLlama:
     def __init__(self, llm):
         self.llm = llm
         self.lock = threading.Lock()
+        self.backend, self.threads = "", 0  # #1198: set by shared_llama from the load (mt_backend.path_of)
 
     def create_chat_completion(self, *a, **k):
         with self.lock:
@@ -182,6 +186,11 @@ def shared_llama(path: Path, gpu: bool, loader=None) -> SharedLlama:
     with _SHARED_LOCK:
         llm = _SHARED.get(key)
         if llm is None:
+            from . import mt_backend
+
+            mt_backend.last_backend, mt_backend.last_threads = "", 0
             llm = SharedLlama(loader(path, gpu))
+            # #1198: what this model runs on, for the GUI status line (a later load of another GGUF moves the globals)
+            llm.backend, llm.threads = mt_backend.last_backend, mt_backend.last_threads
             _SHARED[key] = llm
         return llm
