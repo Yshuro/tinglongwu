@@ -1,0 +1,10 @@
+{
+  "name": "tlwu-extension-spike",
+  "private": true,
+  "version": "0.0.0",
+  "description": "#1158 spike: browser-size ASR + MT in headless Chromium (WASM, CPU only). Not shipped.",
+  "license": "MIT",
+  "dependencies": {
+    "@huggingface/transformers": "4.3.2"
+  }
+}
