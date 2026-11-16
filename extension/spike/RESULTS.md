@@ -25,7 +25,7 @@ whisper-small + opus-mt for en->zh is 371 MB, for ru->zh (pivot ru-en + en-zh) 4
 - ASR: **whisper-small** (`onnx-community/whisper-small`, q8). MT: **opus-mt** (`Xenova/opus-mt-*`, q8; ja/ru -> zh
   pivot through en). Median 6.78 s, p90 8.22 s on this 4-vCPU runner: meets the #711 median <= 8 s budget, p90 does not.
 - Quality gap: the browser stack is well below the desktop pipeline (mean chrF 22.6 vs 32.9 desktop on the same
-  clips). The ASR is close to desktop (same Whisper small); the gap is MT: opus-mt vs Hy-MT2 1.8B, worst on
+  clips). ASR is the same Whisper small model as desktop (q8 here), so most of the gap is MT: opus-mt vs Hy-MT2 1.8B, worst on
   ja->zh (7.85 vs 19.58, a two-hop pivot). NLLB-600M is better for ja->zh and zh->en but 912 MB and ~4 s per line.
 - Not usable: whisper-tiny (ja CER 2.8 = repetition loops); whisper-small + NLLB (median 9.76 s, over budget).
 - WebGPU: the runner has no GPU, so only WASM (CPU) was measured; it is the floor
