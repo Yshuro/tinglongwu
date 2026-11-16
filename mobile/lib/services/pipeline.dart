@@ -11,15 +11,21 @@ import '../logic/draft_gate.dart';
 import '../logic/feature_prefs.dart';
 import '../logic/phone_audio.dart';
 import '../logic/segmenter.dart';
+import '../logic/speakers.dart';
 import '../logic/subtitle_trim.dart';
 import 'app_log.dart';
 import 'device_probe_service.dart';
 import 'asr_worker.dart';
+import 'speaker_worker.dart';
 import 'model_paths.dart';
 import 'play_packs.dart';
 import 'playback_capture.dart';
+import '../logic/conversation.dart';
+import '../logic/speech_out.dart';
 import '../logic/target_language.dart';
 import 'translator.dart';
+import 'tts_player.dart';
+import 'tts_worker.dart';
 
 enum Stage { starting, downloadingModels, loadingModels, listening, missingModels, error }
 
@@ -31,15 +37,26 @@ enum AudioSourceKind { mic, phone }
 const silenceHintText = '沒有聽到影片的聲音：這個 App 可能不允許翻譯（例如有版權保護的影片），或影片還沒開始播放';
 
 class Subtitle {
-  Subtitle(this.ru, {this.zh, this.traditionalOk = true});
+  Subtitle(this.ru,
+      {this.zh, this.traditionalOk = true, this.speaker = Speaker.them, this.seg = -1});
   String ru;
   String? zh;
   bool traditionalOk;
+
+  /// Conversation mode (#558): my lines show on the right; listen-only lines are all [Speaker.them].
+  final Speaker speaker;
+
+  /// VAD segment this line came from, and the voice number found for it (#1155; 0 = none yet).
+  final int seg;
+  int voice = 0;
 }
 
 class _Job {
-  _Job(this.ru, this.sub, this.speechEndMs, this.asrFinalMs, [this.lang = 'en']);
-  final String lang;
+  _Job(this.ru, this.sub, this.speechEndMs, this.asrFinalMs, this.route);
+
+  /// Direction fixed when the line was heard, so a side switch never re-routes queued lines.
+  final ConversationRoute route;
+  String get lang => route.src;
   String ru;
   final Subtitle sub;
 
@@ -133,6 +150,153 @@ class Pipeline extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Face-to-face conversation mode (#558); off = listen-only.
+  Conversation conversation = const Conversation();
+  ConversationStore? _conversationStore;
+
+  /// Turns 對話模式 on or off (remembered).
+  void setConversationEnabled(bool on) {
+    _setConversation(conversation.copyWith(enabled: on));
+    if (on) {
+      if (_tr != null) _ensureTts();
+    } else {
+      _stopSpeaking();
+    }
+  }
+
+  /// Two-way mode: my language / the partner's language (remembered).
+  void setMineLang(String code) => _setConversation(conversation.copyWith(mineLang: code));
+  void setPartnerLang(String code) {
+    final before = conversation.foreign;
+    _setConversation(conversation.copyWith(foreign: code));
+    if (conversation.foreign == before) return;
+    // The read-aloud voice follows the partner's language: drop the old one, load on demand.
+    _tts?.dispose();
+    _tts = null;
+    _ttsLoading = null;
+    ttsInstalled = false;
+    if (conversation.enabled && _tr != null) _ensureTts();
+  }
+
+  /// Direction picked from the detected language (true) or the manual side button (false).
+  void setAutoDirection(bool on) => _setConversation(conversation.copyWith(auto: on));
+
+  /// One tap: the other side is talking now.
+  void switchSpeaker() => _setConversation(conversation.switched());
+
+  void _setConversation(Conversation c) {
+    if (c == conversation) return;
+    conversation = c;
+    _clearDraftTr(); // the draft was translated for the other direction
+    final store = _conversationStore; // null until start() (and AppLog) ran
+    if (store == null) return notifyListeners();
+    store.save(c);
+    _log.i('conversation ${c.enabled ? "on" : "off"} side=${c.side.name} foreign=${c.foreign} mine=${c.mineLang} auto=${c.auto}');
+    notifyListeners();
+  }
+
+  // ---- read-aloud (#558 part 2)
+
+  /// The voice for the other person's language is installed (else my lines are text only).
+  bool ttsInstalled = false;
+
+  /// A line is being read aloud now.
+  bool speaking = false;
+
+  /// End of my speech -> start of the spoken translation, last line (ms).
+  int? lastSpeakLatencyMs;
+  TtsWorker? _tts;
+  Future<void>? _ttsLoading;
+  final SpeakQueue _speakQ = SpeakQueue();
+  final EchoGuard _echo = EchoGuard();
+  bool _speakBusy = false;
+
+  /// Loads the voice once, the first time conversation mode needs it (a voice costs memory).
+  Future<void> _ensureTts() => _ttsLoading ??= _loadTts();
+
+  Future<void> _loadTts() async {
+    final lang = conversation.foreign;
+    final voice = paths?.ttsVoice(lang);
+    ttsInstalled = voice != null;
+    if (voice == null) {
+      _log.i('tts: no $lang voice (${TtsVoiceLayout.rel(lang).join(", ")}), text only');
+      _ttsLoading = null; // look again next time (the pack may be imported meanwhile)
+      if (!_disposed) notifyListeners();
+      return;
+    }
+    try {
+      final t0 = _clock.elapsedMilliseconds;
+      final w = await TtsWorker.spawn(voice);
+      if (_disposed) return w.dispose();
+      _tts = w;
+      _log.i('tts: $lang voice ready in ${_clock.elapsedMilliseconds - t0} ms');
+      _speakNext();
+    } catch (e) {
+      ttsInstalled = false;
+      _ttsLoading = null;
+      _log.e('tts: load failed: $e');
+    }
+    if (!_disposed) notifyListeners();
+  }
+
+  /// Queues a translated line of mine to be read aloud.
+  void _say(Utterance u) {
+    if (!_speakQ.add(u)) return;
+    _ensureTts();
+    _speakNext();
+  }
+
+  Future<void> _speakNext() async {
+    final tts = _tts;
+    if (_speakBusy || _disposed || tts == null) return;
+    _speakBusy = true;
+    try {
+      while (!_disposed && !_speakQ.isEmpty) {
+        final u = _speakQ.next()!;
+        final a = await tts.synth(u.text);
+        if (_disposed || !conversation.enabled) break;
+        if (a.samples.isEmpty) continue;
+        if (!await TtsPlayer.play(a.samples, a.sampleRate)) {
+          _log.e('tts: playback failed');
+          continue;
+        }
+        final start = _clock.elapsedMilliseconds;
+        _echo.playing(startMs: start, durationMs: a.durationMs);
+        lastSpeakLatencyMs = start - u.speechEndMs;
+        speaking = true;
+        notifyListeners();
+        _log.i('TTS [${u.lang}] speakLat=${lastSpeakLatencyMs}ms gen=${a.genMs}ms '
+            'audio=${a.durationMs}ms dropped=${_speakQ.dropped}: ${AppLog.text(u.text)}');
+        await Future<void>.delayed(Duration(milliseconds: a.durationMs));
+        speaking = false;
+        if (!_disposed) notifyListeners();
+      }
+    } catch (e) {
+      _log.e('tts: $e');
+    } finally {
+      _speakBusy = false;
+      speaking = false;
+    }
+  }
+
+  void _stopSpeaking() {
+    _speakQ.clear();
+    if (!speaking) return;
+    speaking = false;
+    _echo.stopped(_clock.elapsedMilliseconds);
+    TtsPlayer.stop();
+  }
+
+  /// Mic audio for the ASR: silence while the phone reads a line aloud (no self-translation).
+  void _onMicPcm(Uint8List b) => _asr?.feedPcm16(_echo.filter(b, _clock.elapsedMilliseconds));
+
+  /// Conversation mode only applies to the microphone (face to face); 看影片翻譯 stays listen-only.
+  Conversation get _activeConversation =>
+      source == AudioSourceKind.mic ? conversation : conversation.copyWith(enabled: false);
+
+  /// Translation target for the line being spoken now.
+  String get activeTarget => _activeConversation.targetFor(target);
+
   Future<bool> _downloadPacks() async {
     stage = Stage.downloadingModels;
     dlError = null;
@@ -161,6 +325,8 @@ class Pipeline extends ChangeNotifier {
       target = _targetStore!.load();
       _prefsStore = FeaturePrefsStore('${paths!.filesDir}/features.txt');
       prefs = _prefsStore!.load();
+      _conversationStore = ConversationStore('${paths!.filesDir}/conversation.txt');
+      conversation = _conversationStore!.load();
       _styleStore = OverlayStyleStore('${paths!.filesDir}/overlay_style.txt');
       overlayStyle = _styleStore!.load();
       phoneSupported = await PlaybackCapture.supported();
@@ -227,6 +393,7 @@ class Pipeline extends ChangeNotifier {
       });
       await ready.future;
       _asr!.setDraft(prefs.sourceDraft);
+      if (prefs.speakerLabels) _startSpeakers();
       _probeStore = ProbeStore('${p.filesDir}/device_probe.json');
       _log.i('ASR ready in ${_clock.elapsedMilliseconds - t0} ms');
 
@@ -240,6 +407,7 @@ class Pipeline extends ChangeNotifier {
       _log.i('LLM ready in ${_clock.elapsedMilliseconds - t1} ms (${p.llmPath.split('/').last}) '
           '${await ModelPaths.statsLine()}');
 
+      if (conversation.enabled) _ensureTts();
       _drain(); // anything queued while the LLM was loading (debug wavs)
       if (_disposed) return;
       await _startMic();
@@ -261,7 +429,7 @@ class Pipeline extends ChangeNotifier {
       numChannels: 1,
     ));
     if (_disposed) return;
-    _micSub = stream.listen(_asr!.feedPcm16, onError: (Object e) => _fail('Mic error: $e'));
+    _micSub = stream.listen(_onMicPcm, onError: (Object e) => _fail('Mic error: $e'));
   }
 
   /// Footer mic button (#1121): true = listening is stopped (mic closed / phone audio dropped).
@@ -392,6 +560,86 @@ class Pipeline extends ChangeNotifier {
     }
   }
 
+  /// 傾斜翻面 (#1146): auto-flip lock, remembered.
+  void setTiltFlip(bool on) {
+    if (on == prefs.tiltFlip) return;
+    prefs = prefs.copyWith(tiltFlip: on);
+    _prefsStore?.save(prefs);
+    notifyListeners();
+  }
+
+  /// 說話者標籤 (#1155): opt-in, needs the optional speaker model. False = not turned on (model
+  /// missing); the caller tells the user to import it.
+  bool setSpeakerLabels(bool on) {
+    if (on == prefs.speakerLabels) return true;
+    if (on && !(paths?.hasSpeakerModel ?? false)) return false;
+    prefs = prefs.copyWith(speakerLabels: on);
+    _prefsStore?.save(prefs);
+    if (on) {
+      _startSpeakers();
+    } else {
+      _stopSpeakers();
+    }
+    notifyListeners();
+    return true;
+  }
+
+  SpeakerWorker? _spk;
+  StreamSubscription<SpeakerResult>? _spkSub;
+  bool _spkStarting = false;
+  final Map<int, int> _voiceBySeg = {};
+
+  /// True while labels are on and the worker runs.
+  bool get speakerLabelsActive => _spk != null;
+
+  Future<void> _startSpeakers() async {
+    final p = paths;
+    if (_spk != null || _spkStarting || _asr == null || p == null || !p.hasSpeakerModel) return;
+    _spkStarting = true;
+    try {
+      final w = await SpeakerWorker.spawn(p.speakerPath);
+      if (w == null || _disposed || !prefs.speakerLabels || _asr == null) {
+        w?.dispose();
+        if (w == null) _log.e('speaker model failed to load; labels stay off');
+        return;
+      }
+      _spk = w;
+      _spkSub = w.results.listen(_onVoice);
+      _asr!.setSpeakerPort(w.port);
+      _log.i('speaker labels on');
+    } catch (e) {
+      _log.e('speaker labels failed: $e');
+    } finally {
+      _spkStarting = false;
+    }
+  }
+
+  void _stopSpeakers() {
+    _asr?.setSpeakerPort(null);
+    _spkSub?.cancel();
+    _spkSub = null;
+    _spk?.dispose();
+    _spk = null;
+    _voiceBySeg.clear();
+    for (final s in subtitles) {
+      s.voice = 0;
+    }
+  }
+
+  void _onVoice(SpeakerResult r) {
+    if (r.speaker == unknownSpeaker || !prefs.speakerLabels) return;
+    _voiceBySeg[r.seg] = r.speaker;
+    if (_voiceBySeg.length > 32) _voiceBySeg.remove(_voiceBySeg.keys.first);
+    var hit = false;
+    for (final s in subtitles) {
+      if (s.seg == r.seg) {
+        s.voice = r.speaker;
+        hit = true;
+      }
+    }
+    if (hit) notifyListeners();
+  }
+
   /// 顯示原文草稿 (#1064): turns the grey interim source text on or off, remembered.
   void setSourceDraft(bool on) {
     if (on == prefs.sourceDraft) return;
@@ -430,7 +678,7 @@ class Pipeline extends ChangeNotifier {
     _trGate.started(nowMs: now, text: text);
     _draftTrStop = false;
     try {
-      final r = await tr.translate(text, src: lang, tgt: target, shouldStop: () => _draftTrStop);
+      final r = await tr.translate(text, src: lang, tgt: _activeConversation.route(lang, listenTarget: target).tgt, shouldStop: () => _draftTrStop);
       if (!_draftTrStop && !_disposed && !_draft.isStale(seg) && r.zh.trim().isNotEmpty) {
         draftTr = r.zh.trim();
         _draftTrSeg = seg;
@@ -593,10 +841,12 @@ class Pipeline extends ChangeNotifier {
     // One subtitle (and one LLM call) per sentence: short lines update fast and the model never
     // sees several sentences to smooth together.
     final sentences = SentenceSegmenter.split(f.text);
+    final route = _activeConversation.route(f.lang, listenTarget: target);
     for (final text in sentences.isEmpty ? [f.text] : sentences) {
-      final sub = Subtitle(text);
+      final sub = Subtitle(text, speaker: route.speaker, seg: f.seg);
+      sub.voice = _voiceBySeg[f.seg] ?? 0;
       subtitles.add(sub);
-      _queue.add(_Job(text, sub, speechEnd, now, f.lang));
+      _queue.add(_Job(text, sub, speechEnd, now, route));
     }
     _trimSubtitles();
     // Bound the backlog: merge the oldest two waiting jobs (keeps all text,
@@ -606,7 +856,7 @@ class Pipeline extends ChangeNotifier {
     final jobs = _queue.toList();
     final plan = ContextBudget.trimPlan(
       [for (final j in jobs) j.ru],
-      [for (final j in jobs) j.lang],
+      [for (final j in jobs) j.route.mergeKey],
       maxQueue,
     );
     if (jobs.length > maxQueue && plan.texts.length > maxQueue) {
@@ -618,7 +868,7 @@ class Pipeline extends ChangeNotifier {
       b.ru = ContextBudget.join(a.ru, b.ru);
       b.sub.ru = b.ru;
       subtitles.remove(a.sub);
-      final merged = _Job(b.ru, b.sub, a.speechEndMs, b.asrFinalMs, b.lang);
+      final merged = _Job(b.ru, b.sub, a.speechEndMs, b.asrFinalMs, b.route);
       jobs
         ..[i] = merged
         ..removeAt(i + 1);
@@ -648,7 +898,8 @@ class Pipeline extends ChangeNotifier {
         queued = _queue.length + 1;
         notifyListeners();
         try {
-          final r = await translateLine(_tr!, job.ru, job.lang, tgt: target);
+          final tgt = job.route.tgt;
+          final r = await translateLine(_tr!, job.ru, job.lang, tgt: tgt);
           final now = _clock.elapsedMilliseconds;
           lastLatencyMs = now - job.speechEndMs;
           lastAfterFinalMs = now - job.asrFinalMs;
@@ -657,8 +908,14 @@ class Pipeline extends ChangeNotifier {
           lastFirstTokenMs = r.firstTokenMs;
           job.sub.zh = r.zh;
           _trimSubtitles();
-          job.sub.traditionalOk = target != 'zh' || r.check.isTraditional;
-          _log.i('ZH [${r.check.isTraditional ? "zh-Hant" : "NOT-TRAD ${r.check}"}'
+          job.sub.traditionalOk = tgt != 'zh' || r.check.isTraditional;
+          if (job.route.speak && conversation.enabled) {
+            _say(Utterance(r.zh, lang: tgt, speechEndMs: job.speechEndMs));
+          }
+          final tag = tgt != 'zh'
+              ? '${job.lang}->$tgt${job.route.speak ? " speak" : ""}'
+              : (r.check.isTraditional ? 'zh-Hant' : 'NOT-TRAD ${r.check}');
+          _log.i('${tgt.toUpperCase()} [$tag'
               '] ${AppLog.text(r.zh)} | '
               'lat=${lastLatencyMs}ms afterFinal=${lastAfterFinalMs}ms '
               'ttft=${r.firstTokenMs}ms tok=${r.tokens} '
@@ -691,8 +948,13 @@ class Pipeline extends ChangeNotifier {
       PlaybackCapture.stop().catchError((_) {});
     }
     _rec.dispose();
+    _spkSub?.cancel();
+    _spk?.dispose();
     _asr?.dispose();
     _tr?.dispose();
+    _tts?.dispose();
+    _speakQ.clear();
+    TtsPlayer.stop();
     try {
       _log.i('=== session end ===');
       _log.flush();

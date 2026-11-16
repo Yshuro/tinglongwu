@@ -9,6 +9,7 @@ from pathlib import Path
 
 DEFAULT_MBPS = 10.0  # fallback download speed (MB/s) when none was measured
 PACK_OF = {"zh": "zh", "en": "en", "ja": "ja", "ko": "ko", "ru": "ru"}  # source language code -> pack name
+TARGET_PACK_OF = {**PACK_OF, **{c: "hymt2" for c in ("es", "fr", "de", "th", "vi", "id")}}  # #1163/#1175: Hy-MT2-only targets
 TEXT = {
     "en": "This needs the {pack} pack (about {mb} MB, about {min} min). Needs internet to download once, "
           "works offline afterwards.",
@@ -33,8 +34,8 @@ def dialog_text(ui_lang: str, pack: str, mb: float, mbps: float | None = None) -
 def needed_packs(source_lang: str, target_lang: str) -> list[str]:
     """Packs a (source, target) pair needs; 'auto' and unknown codes need none. zh-tw / zh-cn -> zh."""
     out = []
-    for code in (source_lang, target_lang):
-        pack = PACK_OF.get((code or "").lower().split("-")[0])
+    for table, code in ((PACK_OF, source_lang), (TARGET_PACK_OF, target_lang)):
+        pack = table.get((code or "").lower().split("-")[0])
         if pack and pack not in out:
             out.append(pack)
     return out
@@ -48,15 +49,31 @@ SIZE_MB = {"hymt2-1.8b": 1100, PIPER_RU: 60}
 OPUS_MB = 100
 
 
+# #1175: a display name for the Hy-MT2-only targets; it downloads the same models as the real pack "ko" (the
+# setup package has no such pack), so everything that touches PACKS or the downloader resolves it first.
+PACK_ALIAS = {"hymt2": "ko"}
+
+
+def real_pack(pack: str) -> str:
+    """The pack tlwu-setup knows for a name shown to the user (see PACK_ALIAS)."""
+    return PACK_ALIAS.get(pack, pack)
+
+
+def shown_pack(asked: str | None, done: str) -> str:
+    """#1181: the pack name for the done/fail status line: the name the dialog showed (`asked`) when it maps to the
+    downloaded pack `done`, else `done` itself."""
+    return asked if asked and real_pack(asked) == done else done
+
+
 def _pack_mb(pack: str) -> int:
-    return sum(SIZE_MB.get(k, OPUS_MB) for k in PACKS[pack])
+    return sum(SIZE_MB.get(k, OPUS_MB) for k in PACKS[real_pack(pack)])
 
 
 def _missing(pack: str, mdir: Path) -> list[str]:
     """Model keys of `pack` not installed: a key counts only if the local manifest.json pinned it and its dir exists."""
     mf = Path(mdir) / "manifest.json"
     man = json.loads(mf.read_text("utf-8")) if mf.exists() else {}
-    return [k for k in PACKS[pack]
+    return [k for k in PACKS[real_pack(pack)]
             if not (k in man and (Path(mdir) / ("opus/" + k[5:] if k.startswith("opus-") else k)).is_dir())]
 
 
@@ -85,6 +102,6 @@ def ensure_packs(source_lang: str, target_lang: str, mdir: Path, ask, download, 
         yes, no = BUTTONS.get(ui_lang, BUTTONS["en"])
         if not ask(dialog_text(ui_lang, pack, mb, mbps), yes, no):
             return False
-        if download(pack) != 0 or missing(pack):
+        if download(real_pack(pack)) != 0 or missing(pack):
             return False
     return True

@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "speaker": {
+    "path": "speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+    "size": 28281164,
+    "sha256": "aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2",
+    "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+    "note": "Optional 說話者 N labels (進階功能): 3D-Speaker CAM++ speaker-embedding model, about 28 MB, same file as desktop. Licence: Apache-2.0 (3D-Speaker)."
+  },
+  "packs": [
+    {
+      "id": "voice-en",
+      "lang": "en",
+      "name": "tlwu-voice-en.zip",
+      "url": "https://github.com/sunososobro-hub/tinglongwu/releases/download/mobile-latest/tlwu-voice-en.zip",
+      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-ljs.tar.bz2",
+      "note": "English read-aloud voice for conversation mode: sherpa-onnx vits-ljs (VITS, LJSpeech, female, 22.05 kHz), about 113 MB. Licence: Apache-2.0 (model card), LJSpeech dataset public domain, lexicon from the CMU Pronouncing Dictionary (BSD-style).",
+      "files": [
+        {"path": "tts-en/model.onnx", "alias": "vits-ljs.onnx", "size": 114124456, "sha256": "5bbd273797a9ecf8d94bd6ec02ad16cb41cbb85f055ad98d528ced3e44c9b31a"},
+        {"path": "tts-en/tokens.txt", "size": 1084, "sha256": "5fee2c6b238d712287f2ecb08f34a8a8b413bcb7390862ef6fb6fd6f0f8d3a17"},
+        {"path": "tts-en/lexicon.txt", "size": 3708181, "sha256": "bdccfc6da71c45c48e2e0056fcf0aab760577c5f959f6c1b5eb3e3e916fd5a0e"}
+      ]
+    }
+  ]
+}

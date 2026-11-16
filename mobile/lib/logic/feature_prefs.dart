@@ -3,7 +3,7 @@ import 'dart:io';
 /// Optional-feature switches, kept in a small "key=value" text file (unknown keys are ignored,
 /// missing or bad values fall back to the defaults).
 class FeaturePrefs {
-  const FeaturePrefs({this.sourceDraft = true, this.zhDraft = false});
+  const FeaturePrefs({this.sourceDraft = true, this.zhDraft = false, this.tiltFlip = true, this.speakerLabels = false});
 
   /// 顯示原文草稿 (#1064): grey source text while a sentence is still being spoken. Default on.
   final bool sourceDraft;
@@ -12,10 +12,24 @@ class FeaturePrefs {
   /// user turns it on, the probe merely recommends.
   final bool zhDraft;
 
-  FeaturePrefs copyWith({bool? sourceDraft, bool? zhDraft}) => FeaturePrefs(
-      sourceDraft: sourceDraft ?? this.sourceDraft, zhDraft: zhDraft ?? this.zhDraft);
+  /// 傾斜翻面 (#1146): auto-flip the subtitle screen when the phone is tipped over to show the
+  /// other person. Default on; the header lock icon turns it off.
+  final bool tiltFlip;
 
-  String format() => 'sourceDraft=${sourceDraft ? 1 : 0}\nzhDraft=${zhDraft ? 1 : 0}\n';
+  /// 說話者標籤 (#1155): per-speaker bubble colour + 「說話者 N」. Default off; needs the optional
+  /// speaker model; only the user turns it on, the probe merely recommends.
+  final bool speakerLabels;
+
+  FeaturePrefs copyWith({bool? sourceDraft, bool? zhDraft, bool? tiltFlip, bool? speakerLabels}) =>
+      FeaturePrefs(
+      speakerLabels: speakerLabels ?? this.speakerLabels,
+      sourceDraft: sourceDraft ?? this.sourceDraft,
+      zhDraft: zhDraft ?? this.zhDraft,
+      tiltFlip: tiltFlip ?? this.tiltFlip);
+
+  String format() =>
+      'sourceDraft=${sourceDraft ? 1 : 0}\nzhDraft=${zhDraft ? 1 : 0}\ntiltFlip=${tiltFlip ? 1 : 0}\n'
+      'speakerLabels=${speakerLabels ? 1 : 0}\n';
 
   static FeaturePrefs parse(String? s) {
     final m = <String, String>{};
@@ -28,14 +42,16 @@ class FeaturePrefs {
           '0' || 'false' => false,
           _ => d,
         };
-    return FeaturePrefs(sourceDraft: b('sourceDraft', true), zhDraft: b('zhDraft', false));
+    return FeaturePrefs(sourceDraft: b('sourceDraft', true), zhDraft: b('zhDraft', false),
+        tiltFlip: b('tiltFlip', true), speakerLabels: b('speakerLabels', false));
   }
 
   @override
-  bool operator ==(Object other) => other is FeaturePrefs && other.sourceDraft == sourceDraft && other.zhDraft == zhDraft;
+  bool operator ==(Object other) => other is FeaturePrefs && other.sourceDraft == sourceDraft && other.zhDraft == zhDraft &&
+      other.tiltFlip == tiltFlip && other.speakerLabels == speakerLabels;
 
   @override
-  int get hashCode => Object.hash(sourceDraft, zhDraft);
+  int get hashCode => Object.hash(sourceDraft, zhDraft, tiltFlip, speakerLabels);
 }
 
 class FeaturePrefsStore {

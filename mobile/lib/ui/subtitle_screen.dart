@@ -1,9 +1,16 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 
+import '../logic/conversation.dart';
 import '../logic/debug_stats.dart';
 import '../logic/phone_audio.dart';
+import '../logic/speakers.dart';
+import '../logic/speech_out.dart';
 import '../logic/target_language.dart';
+import '../logic/tilt_flip.dart';
 import '../services/pipeline.dart';
 import '../services/playback_capture.dart';
 import 'advanced_screen.dart';
@@ -24,6 +31,19 @@ class UiColors {
   static const dotLoading = Color(0xFFE0A000);
   static const dotOn = Color(0xFF2EA043);
   static const dotError = Color(0xFFD0453A);
+}
+
+/// Accent colour of speaker [n] (#1155, 1-based, cycles).
+Color speakerAccent(int n) {
+  const accents = [
+    Color(0xFF4FC3F7),
+    Color(0xFFFFB74D),
+    Color(0xFF81C784),
+    Color(0xFFF06292),
+    Color(0xFFBA68C8),
+    Color(0xFFFFF176),
+  ];
+  return accents[(n - 1) % accents.length];
 }
 
 /// Footer state: idle (stopped) / loading (switching source) / listening / error.
@@ -50,17 +70,63 @@ ListenState listenStateOf(Pipeline p) {
   return p.paused ? ListenState.idle : ListenState.on;
 }
 
+/// 對話模式 is on and applies (microphone only, #558).
+bool conversationActive(Pipeline p) => p.conversation.enabled && p.source == AudioSourceKind.mic;
+
 /// Empty-state hint (differs for 看影片翻譯).
 String emptyHint({required bool phone}) =>
     phone ? '播放影片，翻譯字幕會出現在這裡' : '對著手機說話，翻譯字幕會出現在這裡';
 
 /// Dark conversation view: header (mode, settings, language pill), one bubble per finished
 /// line (small source above, large translation below), a dashed grey bubble for the pending
-/// draft, and a footer with status + a round start/stop mic button. The pipeline has no
-/// speaker sides, so every line is a left "other" bubble.
-class SubtitleScreen extends StatelessWidget {
-  const SubtitleScreen({super.key, required this.pipeline});
+/// draft, and a footer with status + a round start/stop mic button. Listen-only lines are left
+/// "other" bubbles; in 對話模式 (#558) my lines are right "me" bubbles.
+class SubtitleScreen extends StatefulWidget {
+  const SubtitleScreen({super.key, required this.pipeline, this.gravity});
   final Pipeline pipeline;
+
+  /// Accelerometer (gravity included, m/s^2) samples; defaults to the device sensor (#1146).
+  final Stream<List<double>>? gravity;
+
+  @override
+  State<SubtitleScreen> createState() => _SubtitleScreenState();
+}
+
+class _SubtitleScreenState extends State<SubtitleScreen> {
+  final _tilt = TiltFlipDetector();
+  StreamSubscription<List<double>>? _sub;
+  bool _flipped = false;
+
+  Pipeline get pipeline => widget.pipeline;
+
+  @override
+  void initState() {
+    super.initState();
+    try {
+      final src = widget.gravity ??
+          accelerometerEventStream(samplingPeriod: SensorInterval.normalInterval)
+              .map((e) => [e.x, e.y, e.z]);
+      _sub = src.listen(_onSample, onError: (_) {}, cancelOnError: false);
+    } catch (_) {}
+  }
+
+  void _onSample(List<double> a) {
+    if (!pipeline.prefs.tiltFlip) {
+      if (_flipped || _tilt.flipped) {
+        _tilt.reset();
+        setState(() => _flipped = false);
+      }
+      return;
+    }
+    final f = _tilt.feed(a[0], a[1], a[2], DateTime.now().millisecondsSinceEpoch);
+    if (f != _flipped) setState(() => _flipped = f);
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
 
   String _debug() {
     final p = pipeline;
@@ -90,10 +156,9 @@ class SubtitleScreen extends StatelessWidget {
     final draft = pipeline.silenceHint ? silenceHintText : (pipeline.paused ? '' : _draftText());
     final showDraft = draft.isNotEmpty && (pipeline.silenceHint || draft != '…' || subs.isNotEmpty);
     final empty = subs.isEmpty && !showDraft;
+    final listener = _flipped && pipeline.prefs.tiltFlip;
 
-    return Scaffold(
-      backgroundColor: UiColors.bg,
-      body: Column(
+    final body = Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _Header(
@@ -113,7 +178,10 @@ class SubtitleScreen extends StatelessWidget {
                         children: [
                           for (var i = 0; i < subs.length; i++)
                             _line(subs[i],
-                                isNewest: i == subs.length - 1, big: big, mode: mode),
+                                isNewest: i == subs.length - 1,
+                                big: listener ? big * 1.4 : big,
+                                mode: mode,
+                                listener: listener),
                           if (showDraft)
                             _bubble(
                               dashed: true,
@@ -136,7 +204,11 @@ class SubtitleScreen extends StatelessWidget {
           ),
           _Footer(pipeline: pipeline),
         ],
-      ),
+      );
+    return Scaffold(
+      backgroundColor: UiColors.bg,
+      // Listener view (#1146): rotate the content only, the system orientation is untouched.
+      body: listener ? RotatedBox(key: const Key('listenerView'), quarterTurns: 2, child: body) : body,
     );
   }
 
@@ -147,25 +219,51 @@ class SubtitleScreen extends StatelessWidget {
     bottomRight: Radius.circular(16),
   );
 
-  Widget _bubble({required List<Widget> children, bool dashed = false}) {
+  static const _radiusMe = BorderRadius.only(
+    topLeft: Radius.circular(16),
+    topRight: Radius.circular(4),
+    bottomLeft: Radius.circular(16),
+    bottomRight: Radius.circular(16),
+  );
+
+  Widget _bubble(
+      {required List<Widget> children, bool dashed = false, bool me = false, int voice = 0}) {
+    final accent = voice > 0 && !me ? speakerAccent(voice) : null;
     final box = Container(
       constraints: const BoxConstraints(maxWidth: 560),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
       decoration: BoxDecoration(
-        color: dashed ? Colors.transparent : UiColors.other,
-        borderRadius: _radius,
+        color: dashed
+            ? Colors.transparent
+            : (me
+                ? UiColors.me
+                : accent == null
+                    ? UiColors.other
+                    : Color.alphaBlend(accent.withValues(alpha: 0.22), UiColors.other)),
+        borderRadius: me ? _radiusMe : _radius,
       ),
       foregroundDecoration: dashed ? const _DashedDecoration() : null,
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: children),
+      child: Column(
+          crossAxisAlignment: me ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          children: [
+            if (accent != null)
+              Text(speakerLabel(voice),
+                  style: TextStyle(
+                      fontSize: 12, color: accent, fontWeight: FontWeight.w600, height: 1.4)),
+            ...children,
+          ]),
     );
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
-      child: Align(alignment: Alignment.centerLeft, child: box),
+      child: Align(alignment: me ? Alignment.centerRight : Alignment.centerLeft, child: box),
     );
   }
 
   Widget _line(Subtitle s,
-      {required bool isNewest, required double big, required SubtitleMode mode}) {
+      {required bool isNewest,
+      required double big,
+      required SubtitleMode mode,
+      bool listener = false}) {
     final pending = s.zh == null;
     final fs = isNewest ? big : big * 0.85;
     const fg = UiColors.otherFg;
@@ -189,7 +287,7 @@ class SubtitleScreen extends StatelessWidget {
     } else {
       final zh = s.zh!;
       final src = s.ru.trim();
-      final showSrc = mode == SubtitleMode.both && src.isNotEmpty && src != zh.trim();
+      final showSrc = !listener && mode == SubtitleMode.both && src.isNotEmpty && src != zh.trim();
       parts = [
         if (showSrc)
           Padding(
@@ -199,7 +297,11 @@ class SubtitleScreen extends StatelessWidget {
         text(zh, fs, fg, underline: !s.traditionalOk),
       ];
     }
-    return _bubble(dashed: pending && mode != SubtitleMode.source, children: parts);
+    return _bubble(
+        dashed: pending && mode != SubtitleMode.source,
+        me: s.speaker == Speaker.me,
+        voice: pipeline.prefs.speakerLabels ? s.voice : 0,
+        children: parts);
   }
 }
 
@@ -215,7 +317,7 @@ class _DashedPainter extends BoxPainter {
   void paint(Canvas canvas, Offset offset, ImageConfiguration cfg) {
     final size = cfg.size;
     if (size == null) return;
-    final rr = SubtitleScreen._radius.toRRect(offset & size);
+    final rr = _SubtitleScreenState._radius.toRRect(offset & size);
     final paint = Paint()
       ..color = UiColors.draft
       ..style = PaintingStyle.stroke
@@ -282,6 +384,26 @@ class _Header extends StatelessWidget {
                         style: TextStyle(
                             fontSize: 15, fontWeight: FontWeight.w700, color: Colors.white)),
               ),
+              if (pipeline.source == AudioSourceKind.mic)
+                IconButton(
+                  key: const Key('conversationToggle'),
+                  tooltip: pipeline.conversation.enabled ? '關閉對話模式' : '對話模式（面對面雙向翻譯）',
+                  visualDensity: VisualDensity.compact,
+                  icon: Icon(pipeline.conversation.enabled ? Icons.forum : Icons.forum_outlined,
+                      size: 20,
+                      color: pipeline.conversation.enabled ? Colors.lightBlueAccent : Colors.white70),
+                  onPressed: () => pipeline.setConversationEnabled(!pipeline.conversation.enabled),
+                ),
+              IconButton(
+                key: const Key('tiltLockToggle'),
+                tooltip: pipeline.prefs.tiltFlip ? '自動翻面已開（點一下鎖定）' : '自動翻面已鎖定（點一下開啟）',
+                visualDensity: VisualDensity.compact,
+                icon: Icon(
+                    pipeline.prefs.tiltFlip ? Icons.screen_rotation : Icons.screen_lock_rotation,
+                    size: 20,
+                    color: pipeline.prefs.tiltFlip ? Colors.lightBlueAccent : Colors.white70),
+                onPressed: () => pipeline.setTiltFlip(!pipeline.prefs.tiltFlip),
+              ),
               IconButton(
                 tooltip: '字幕顯示設定',
                 visualDensity: VisualDensity.compact,
@@ -290,7 +412,44 @@ class _Header extends StatelessWidget {
               ),
             ]),
             const SizedBox(height: 6),
-            PopupMenuButton<String>(
+            if (conversationActive(pipeline))
+              PopupMenuButton<String>(
+                key: const Key('pairMenu'),
+                tooltip: '我的語言 / 對方語言',
+                onSelected: (v) {
+                  final c = v.substring(2);
+                  if (v.startsWith('m:')) pipeline.setMineLang(c);
+                  if (v.startsWith('p:')) pipeline.setPartnerLang(c);
+                  if (v == 'a:1') pipeline.setAutoDirection(!pipeline.conversation.auto);
+                },
+                itemBuilder: (_) => [
+                  for (final c in TargetLanguage.spoken)
+                    PopupMenuItem(
+                        value: 'm:$c', child: Text('我的語言：${TargetLanguage.options[c]}')),
+                  const PopupMenuDivider(),
+                  for (final c in TargetLanguage.options.keys)
+                    if (c != pipeline.conversation.mineLang)
+                      PopupMenuItem(value: 'p:$c', child: Text('對方語言：${TargetLanguage.options[c]}')),
+                  const PopupMenuDivider(),
+                  PopupMenuItem(
+                      value: 'a:1',
+                      child: Text(pipeline.conversation.auto ? '改為手動切換說話人' : '改為自動判斷說話人')),
+                ],
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                      '對話模式  ${pipeline.conversation.pairLabel}  · '
+                      '${voiceStatusLabel(installed: pipeline.ttsInstalled, speaking: pipeline.speaking)}',
+                      style: const TextStyle(
+                          fontSize: 12, color: Colors.white, fontWeight: FontWeight.w700)),
+                ),
+              )
+            else
+              PopupMenuButton<String>(
               tooltip: '字幕要翻成哪種語言',
               initialValue: pipeline.target,
               onSelected: pipeline.setTarget,
@@ -373,10 +532,37 @@ class _Footer extends StatelessWidget {
                 ),
               ),
             ),
-            const Expanded(child: SizedBox()),
+            Expanded(
+              child: conversationActive(pipeline) && !pipeline.conversation.auto
+                  ? Align(alignment: Alignment.centerRight, child: _SideButton(pipeline: pipeline))
+                  : const SizedBox(),
+            ),
           ]),
         ),
       ),
+    );
+  }
+}
+
+/// 對話模式: one tap switches who is talking (#558).
+class _SideButton extends StatelessWidget {
+  const _SideButton({required this.pipeline});
+  final Pipeline pipeline;
+
+  @override
+  Widget build(BuildContext context) {
+    final me = pipeline.conversation.side == Speaker.me;
+    return TextButton.icon(
+      key: const Key('sideButton'),
+      style: TextButton.styleFrom(
+        foregroundColor: Colors.white,
+        backgroundColor: me ? UiColors.me : UiColors.other,
+        shape: const StadiumBorder(),
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+      ),
+      onPressed: pipeline.switchSpeaker,
+      icon: const Icon(Icons.swap_horiz, size: 16),
+      label: Text(pipeline.conversation.sideLabel, style: const TextStyle(fontSize: 12)),
     );
   }
 }

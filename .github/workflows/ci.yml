@@ -25,7 +25,7 @@ jobs:
           AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}
           AUTHOR_ID: ${{ github.event.pull_request.user.id }}
         run: |
-          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/commits?per_page=100" --paginate --slurp > "$RUNNER_TEMP/commits.json"
+          bash scripts/fetch_pr_commits.sh "$GITHUB_REPOSITORY" "$PR" "$RUNNER_TEMP/commits.json"
           python scripts/commit_identity.py "$RUNNER_TEMP/commits.json" --author-login "$AUTHOR_LOGIN" --author-id "$AUTHOR_ID" --expected-count "$PR_COMMITS"
       - name: System libraries (audio capture libs are imported by the package)
         # Fail fast on runner DNS/mirror outages (2026-11-11 azure.archive.ubuntu.com) instead of hanging the job.
@@ -51,7 +51,31 @@ jobs:
         env:
           TLWU_REQUIRE_DISPLAY: "1"
         run: xvfb-run -a -s "-screen 0 1920x1080x24" python -m pytest -q --timeout=120
+      - name: GUI acceptance screenshots (#1129)
+        if: always()
+        timeout-minutes: 10
+        env:
+          TLWU_REQUIRE_DISPLAY: "1"
+          TLWU_GUI_SHOTS: gui-acceptance
+        run: |
+          pip install "pillow==11.3.0"
+          xvfb-run -a -s "-screen 0 1366x768x24" python -m pytest -q --timeout=120 tests/test_gui_acceptance_owner.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: gui-acceptance
+          path: gui-acceptance/*.png
+          if-no-files-found: ignore
       - name: Tests with the network physically disabled (offline suite + everything else)
         # new empty network namespace: no interfaces except loopback. The in-process guard (tinglongwu.offline) is on
         # as well, so a library that phones home fails the test twice over (blocked + no route).
         run: bash scripts/ci_offline.sh python -m pytest -q
+      - name: Chrome extension tab capture (#1159)
+        # after the offline suite: Playwright + Chromium are installed only here. A skip is a failure (REQUIRE).
+        timeout-minutes: 10
+        env:
+          TLWU_REQUIRE_EXTENSION: "1"
+        run: |
+          pip install "playwright==1.63.0"
+          python -m playwright install --with-deps chromium
+          python -m pytest -q --timeout=120 tests/test_extension_capture_1159.py

@@ -1,7 +1,7 @@
 name: mobile
 description: "tinglongWu mobile: offline live ru->zh-Hant subtitles (prototype)"
 publish_to: 'none'
-version: 0.2.0+1
+version: 1.0.0+1
 
 environment:
   sdk: ^3.13.5
@@ -16,6 +16,7 @@ dependencies:
       url: https://github.com/netdur/llama_cpp_dart
       ref: 23dae0bd696db6378c6869ed930ece4f58c7a4b9
   package_info_plus: ^10.2.2
+  sensors_plus: ^7.0.0
 
 dev_dependencies:
   flutter_test:
@@ -32,3 +33,4 @@ flutter:
   uses-material-design: true
   assets:
     - assets/models_manifest.json
+    - assets/voice_packs.json
