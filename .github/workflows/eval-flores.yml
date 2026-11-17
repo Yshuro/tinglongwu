@@ -7,6 +7,10 @@ name: eval-flores
 # #1305: `matrix=6x6` runs the source x target language-pair matrix instead (en / ru / zh-Hans / zh-Hant / ja / ko,
 # 30 directions, greedy, first 200 sentences unless `limit` is set): one job per source, five targets each, and a
 # `table` job that writes the 6x6 `COMET / chrF` table (docs/benchmarks.md) to its step summary + `flores-6x6-table`.
+# #1351: `variants` (card = shipped prompt + Q4_K_M, src = prompt names the source language, q8 = Q8_0 GGUF,
+# 7b = the opt-in Hy-MT2-7B Q4_K_M from `tlwu-setup --hymt7b`) adds a
+# job per variant, `tgts` picks the targets (default zho_Hant), and every job writes the error breakdown of its 40
+# lowest-COMET sentences (named entities, numbers, omissions, ...) to its step summary and log.
 # Only runs when this workflow or the runner script changes, or by hand (workflow_dispatch, once on the default branch).
 on:
   pull_request:
@@ -30,6 +34,12 @@ on:
         type: choice
         options: ["", "6x6"]
         default: ""
+      variants:
+        description: "comma list of experiment variants (#1351): card, src (prompt names the source language), q8 (Q8_0), 7b (Hy-MT2-7B)"
+        default: "card"
+      tgts:
+        description: "comma list of FLORES targets (#1351; default zho_Hant; ignored by matrix=6x6)"
+        default: "zho_Hant"
 
 permissions:
   contents: read
@@ -53,6 +63,7 @@ jobs:
       temp: ${{ steps.m.outputs.temp }}
       tgts: ${{ steps.m.outputs.tgts }}
       limit: ${{ steps.m.outputs.limit }}
+      variant: ${{ steps.m.outputs.variant }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -63,17 +74,21 @@ jobs:
           TEMPS: ${{ inputs.temps || '0.7,0.2,0' }}
           MATRIX: ${{ inputs.matrix || '' }}
           LIMIT: ${{ inputs.limit || '0' }}
+          VARIANTS: ${{ inputs.variants || 'card' }}
+          TGTS: ${{ inputs.tgts || 'zho_Hant' }}
         run: |
           case "$LIMIT" in ''|*[!0-9]*) echo "limit must be a number" >&2; exit 1;; esac
           if [ "$MATRIX" = "6x6" ]; then
             echo "src=$(python3 scripts/bench/flores_cpu.py --matrix6)" >> "$GITHUB_OUTPUT"
             echo "tgts=$(python3 scripts/bench/flores_cpu.py --matrix6)" >> "$GITHUB_OUTPUT"
             echo 'temp=["0"]' >> "$GITHUB_OUTPUT"
+            echo 'variant=["card"]' >> "$GITHUB_OUTPUT"
             [ "$LIMIT" = "0" ] && LIMIT=200
           else
             echo "src=$(python3 scripts/bench/flores_cpu.py --matrix "$LANGS")" >> "$GITHUB_OUTPUT"
-            echo 'tgts=["zho_Hant"]' >> "$GITHUB_OUTPUT"
+            echo "tgts=$(python3 scripts/bench/flores_cpu.py --tgts "$TGTS")" >> "$GITHUB_OUTPUT"
             echo "temp=$(python3 scripts/bench/flores_cpu.py --temps "$TEMPS")" >> "$GITHUB_OUTPUT"
+            echo "variant=$(python3 scripts/bench/flores_cpu.py --variants "$VARIANTS")" >> "$GITHUB_OUTPUT"
           fi
           echo "limit=$LIMIT" >> "$GITHUB_OUTPUT"
 
@@ -86,9 +101,11 @@ jobs:
       matrix:
         src: ${{ fromJSON(needs.plan.outputs.src) }}
         temp: ${{ fromJSON(needs.plan.outputs.temp) }}
+        variant: ${{ fromJSON(needs.plan.outputs.variant) }}
     env:
       SRC: ${{ matrix.src }}
       TEMP: ${{ matrix.temp }}
+      VARIANT: ${{ matrix.variant }}
       TGTS: ${{ needs.plan.outputs.tgts }}
       LIMIT: ${{ needs.plan.outputs.limit }}
     steps:
@@ -128,17 +145,25 @@ jobs:
             ~/tlwu-models
             ~/bench/flores200_dataset
             ~/.cache/huggingface
-          key: eval-flores-v1-${{ hashFiles('tinglongwu_setup/manifest.json', 'tinglongwu_setup/downloader.py') }}
+          key: eval-flores-v2-${{ hashFiles('tinglongwu_setup/manifest.json', 'tinglongwu_setup/downloader.py') }}
       - name: Hy-MT2 1.8B + FLORES-200
         run: |
           tlwu-setup --hymt --models-dir "$TLWU_MODELS"
           python scripts/bench/fetch_data.py --out "$BENCH" --fleurs ""
+          if [ "${{ matrix.variant }}" = "q8" ]; then python scripts/bench/flores_cpu.py --fetch-q8 "$TLWU_MODELS"; fi
+          if [ "${{ matrix.variant }}" = "7b" ]; then
+            # the 4.8 GB 7B GGUF and its manifest entry live in their own uncached models dir; the cached
+            # $TLWU_MODELS only gets a symlink, so the shared actions cache stays at the 1.8B size and a restored
+            # manifest can never claim a 7B that is not on this runner
+            tlwu-setup --hymt7b --models-dir "$HOME/tlwu-models-7b"
+            ln -sfn "$HOME/tlwu-models-7b/hymt2-7b" "$TLWU_MODELS/hymt2-7b"
+          fi
       - name: Translate (CPU, Hy-MT2 temperature from the matrix; 0 = greedy, repeatable)
         run: |
           for TGT in $(python3 -c 'import json, os; print(" ".join(json.loads(os.environ["TGTS"])))'); do
             [ "$TGT" = "$SRC" ] && continue
             python scripts/bench/flores_cpu.py --data "$BENCH/flores200_dataset" --src "$SRC" --tgt "$TGT" \
-              --out out --limit "$LIMIT" --no-comet --temp "$TEMP"
+              --out out --limit "$LIMIT" --no-comet --temp "$TEMP" --variant "$VARIANT"
           done
       - name: Score chrF + COMET (CPU)
         run: |
@@ -149,17 +174,19 @@ jobs:
           done
           python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
           import json, pathlib
-          print("| pair | temp | n | chrF | COMET | U+FFFD lines | median s/sentence | p90 s | CPU |")
-          print("|---|---|---|---|---|---|---|---|---|")
+          print("| pair | variant | temp | n | chrF | COMET | U+FFFD lines | median s/sentence | p90 s | CPU |")
+          print("|---|---|---|---|---|---|---|---|---|---|")
           for p in sorted(pathlib.Path("out").glob("*.summary.json")):
               s = json.loads(p.read_text("utf-8"))
-              print(f"| {s['pair']} | {s.get('temperature')} | {s['n']} | {s['chrF']} | {s.get('COMET')} | "
-                    f"{s.get('fffd_lines')} | {s['median_s']} | {s['p90_s']} | {s['cpu']} |")
+              print(f"| {s['pair']} | {s.get('variant', 'card')} | {s.get('temperature')} | {s['n']} | {s['chrF']} | "
+                    f"{s.get('COMET')} | {s.get('fffd_lines')} | {s['median_s']} | {s['p90_s']} | {s['cpu']} |")
           EOF
+      - name: Error breakdown of the 40 lowest-COMET sentences (#1351)
+        run: python3 scripts/bench/flores_cpu.py --breakdown out 40 | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: flores-${{ matrix.src }}-t${{ matrix.temp }}
+          name: flores-${{ matrix.src }}-t${{ matrix.temp }}${{ matrix.variant != 'card' && format('-{0}', matrix.variant) || '' }}
           path: out/
           if-no-files-found: warn
 
@@ -183,8 +210,50 @@ jobs:
             echo "### MT language-pair matrix (COMET / chrF), run ${GITHUB_RUN_ID}, commit ${GITHUB_SHA::7}"
             echo
             python3 scripts/bench/flores_cpu.py --table arts
+            echo
+            echo "### Traffic lights with the Google reference (#1352)"
+            echo
+            python3 scripts/bench/matrix_lights.py arts
           } | tee table.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: flores-6x6-table
           path: table.md
+      - name: 20 lowest-COMET sentences per direction (#1346)
+        run: |
+          python3 scripts/bench/flores_cpu.py --worst arts 20 worst.json
+          test "$(wc -c < worst.json)" -lt 1000000
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flores-6x6-worst
+          path: worst.json
+
+  publish:
+    # #1346: keep the worst sentences on the `eval-results` branch (Actions artifacts expire); pushes there only
+    needs: [table, flores]
+    if: ${{ inputs.matrix == '6x6' && github.event_name == 'workflow_dispatch' && needs.table.result == 'success' && needs.flores.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write   # push to eval-results only
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: flores-6x6-worst
+      - name: Commit to eval-results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          D=$(date -u +%F)
+          git init -q repo && cd repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          if git fetch --depth=1 origin eval-results 2>/dev/null; then git checkout -q -B eval-results FETCH_HEAD; else git checkout -q --orphan eval-results; fi
+          mkdir -p flores
+          cp ../worst.json "flores/${D}-${GITHUB_RUN_ID}.json"
+          git add flores
+          if git diff --cached --quiet; then echo "already published"; exit 0; fi
+          git commit -q -m "eval: flores worst sentences ${D} run ${GITHUB_RUN_ID}"
+          git push origin HEAD:refs/heads/eval-results

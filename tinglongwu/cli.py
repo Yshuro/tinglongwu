@@ -342,11 +342,11 @@ def make_translator(engine: str, mdir, zh_variant: str, dev: str, say=print, cho
 
 def pending_or_none(mdir, engine: str, build, zh_variant: str = "tw", warn=None):
     """#1357 (--mt-pending): a PendingTranslator when the default engine's Hy-MT2 1.8B model is not complete yet,
-    else None (the caller builds the engine as usual). Only auto / hymt2 / hymt2-cpu are deferred: the other
+    else None (the caller builds the engine as usual). Only auto / hymt (the GUI manual engine) / hymt2 / hymt2-cpu are deferred: the other
     engines never wait for this download."""
     from .mt_pending import PendingTranslator, hymt_complete
 
-    if engine not in ("auto", "hymt2", "hymt2-cpu") or hymt_complete(mdir):
+    if engine not in ("auto", "hymt", "hymt2", "hymt2-cpu") or hymt_complete(mdir):
         return None
     return PendingTranslator(lambda: hymt_complete(mdir), build, zh_variant=zh_variant,
                              warn=warn or (lambda m: print(m, file=sys.stderr, flush=True)))
@@ -796,7 +796,9 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
                                                   lambda: active_mt_path(translator)),
             on_record=on_record, recorder=recorder, seg_gate=seg_gate, route=f2f_route,
             on_backlog=backlog_line or (lambda n: print(backlog_text(n) or "tlwu: ASR caught up", file=sys.stderr, flush=True)),
-            on_mt_wait=mt_wait_line or (lambda n: print(f"tlwu: {mt_wait_text(n) or 'MT resumed'}", file=sys.stderr, flush=True)))
+            on_mt_wait=mt_wait_line or (lambda n: print(f"tlwu: {mt_wait_text(n) or 'MT resumed'}", file=sys.stderr, flush=True)),
+            on_catchup=lambda n: (notice or (lambda m: print(f"tlwu: {m}", file=sys.stderr, flush=True)))(
+                _t("catchup_note", lines=n)))  # #1369
     except KeyboardInterrupt:
         interrupted = True
         raise

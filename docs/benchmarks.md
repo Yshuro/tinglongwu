@@ -39,18 +39,58 @@ Every direction between the six languages (30 cells, rows = source, columns = ta
 
 Results: [eval-flores 43893644257](https://github.com/sunososobro-hub/tinglongwu/actions/runs/43893644257) (`matrix=6x6`), commit 1bc72da, first 200 sentences per direction, 4 vCPU GitHub runner. Weakest shipped direction in this run: ru -> zh-Hant, COMET 0.870, so "(weak)" = COMET below 0.870 (COMET is stored to 3 decimals; 0.870 itself is not weak).
 
-| src \ tgt | en | ru | zh-Hans | zh-Hant | ja | ko |
+Traffic lights by COMET (rounded to 3 decimals): 🟢 >= 0.880, 🟡 0.870-0.879, 🔴 < 0.870 (0.870 = weakest shipped direction in this run, ru -> zh-Hant). `G` = Google Cloud Translation v2 COMET with the gap to ours (positive = Google ahead); `G -` = no Google number yet. The Google numbers come from different sentence sets (ru -> zh-Hant 1012 sentences, ru -> en and en -> zh-Hant 50) and are listed in `scripts/bench/data/google_refs.json`; ours are the first 200. The table is generated: `python scripts/bench/matrix_lights.py scripts/bench/data/matrix_6x6_43893644257.json` (the `table` job of `eval-flores.yml` prints it for every `matrix=6x6` run). chrF per cell stays in the run's `flores-6x6-table` artifact.
+
+| source \ target | en | ru | zh-Hans | zh-Hant | ja | ko |
 |---|---|---|---|---|---|---|
-| en | - | 0.889 / 55.1 | 0.892 / 38.3 | 0.893 / 30.6 | 0.919 / 41.0 | 0.904 / 36.9 |
-| ru | 0.854 / 58.2 (weak) | - | 0.865 / 29.9 (weak) | 0.870 / 25.1 | 0.882 / 33.0 | 0.863 / 29.6 (weak) |
-| zh-Hans | 0.874 / 57.9 | 0.885 / 47.2 | - | 0.920 / 33.0 (OpenCC) | 0.906 / 34.6 | 0.883 / 31.0 |
-| zh-Hant | 0.866 / 56.0 (weak) | 0.870 / 45.3 | 0.907 / 31.7 (OpenCC) | - | 0.902 / 33.0 | 0.879 / 29.1 |
-| ja | 0.868 / 54.5 (weak) | 0.871 / 44.6 | 0.884 / 28.0 | 0.889 / 24.3 | - | 0.887 / 32.8 |
-| ko | 0.868 / 54.7 (weak) | 0.870 / 45.5 | 0.874 / 28.4 | 0.882 / 24.3 | 0.898 / 36.9 | - |
+| **en** |  | 🟢 0.889<br>G - | 🟢 0.892<br>G - | 🟢 0.893<br>G 0.900 (gap +0.007) | 🟢 0.919<br>G - | 🟢 0.904<br>G - |
+| **ru** | 🔴 0.854<br>G 0.883 (gap +0.029) |  | 🔴 0.865<br>G - | 🟡 0.870<br>G 0.879 (gap +0.009) | 🟢 0.882<br>G - | 🔴 0.863<br>G - |
+| **zh-Hans** | 🟡 0.874<br>G - | 🟢 0.885<br>G - |  | 🟢 0.920 (script conversion)<br>G - | 🟢 0.906<br>G - | 🟢 0.883<br>G - |
+| **zh-Hant** | 🔴 0.866<br>G - | 🟡 0.870<br>G - | 🟢 0.907 (script conversion)<br>G - |  | 🟢 0.902<br>G - | 🟡 0.879<br>G - |
+| **ja** | 🔴 0.868<br>G - | 🟡 0.871<br>G - | 🟢 0.884<br>G - | 🟢 0.889<br>G - |  | 🟢 0.887<br>G - |
+| **ko** | 🔴 0.868<br>G - | 🟡 0.870<br>G - | 🟡 0.874<br>G - | 🟢 0.882<br>G - | 🟢 0.898<br>G - |  |
+
+17 green / 7 yellow / 6 red (green >= 0.880, yellow 0.870-0.879, red < 0.870); largest gap to Google: ru -> en +0.029
 
 - Into English is the weakest target on COMET (0.854-0.874) although its chrF is the highest (54.5-58.2): chrF is not comparable across target languages (character n-grams in English vs Chinese / Japanese), compare cells of one column only.
 - Russian as the source is the weakest row (4 of 5 cells at or below the shipped floor); every direction into Russian stays at or above it (0.870-0.889).
 - Median s/sentence (CPU): -> zh 1.3-2.4, -> en 2.3-2.8, -> ja / ko 2.1-3.9, -> ru 4.1-4.4.
+
+### Why Russian as the source is weak (#1351)
+Same data as the 6x6 run (first 200 FLORES-200 devtest sentences, Hy-MT2-1.8B, greedy, 4 vCPU GitHub runners); `eval-flores` now writes an error breakdown of the 40 lowest-COMET sentences of every direction (`flores_cpu.py --breakdown`, heuristic categories, one sentence can have several) and takes experiment `variants` and `tgts`. Runs: before = [44013625413](https://github.com/sunososobro-hub/tinglongwu/actions/runs/44013625413) (commit 1d4ad28), after = [44016598460](https://github.com/sunososobro-hub/tinglongwu/actions/runs/44016598460) (commit 712198c). Reproduce on any revision that has the `variants` / `tgts` inputs (#1351 onwards): `gh workflow run eval-flores.yml --ref <ref> -f langs=rus_Cyrl -f tgts=zho_Hant,eng_Latn -f limit=200 -f temps=0 -f variants=card,src,q8`. `--ref` takes a branch or tag; on dev after #1368 every variant includes the echo fix. To rerun the exact commits behind the table (before = 1d4ad28, variants and breakdown without the echo fix; after = 712198c, echo fix in `tinglongwu/hymt.py`), check the commit out locally and run the CPU commands of the Hy-MT2 section below with `--src rus_Cyrl --tgt zho_Hant` / `--tgt eng_Latn --limit 200 --temp 0 --variant <card|src|q8>`, then `--breakdown OUT 40`. Use a fresh `--out` per commit and variant (the runner resumes rows already in OUT) and the same OUT for its `--score-only` step. The q8 row exists only for 712198c, which has `--fetch-q8 MODELS` (run it before translating); 1d4ad28 has `card` and `src` only.
+
+Error breakdown of the 40 lowest-COMET sentences (share among the 40 / share among all 200):
+
+| category | ru -> en before fix | ru -> en after fix | ru -> zh-Hant |
+|---|---|---|---|
+| output echoes the prompt's instruction line | (not counted yet; shows as "addition") | 0% / 0% | 0% / 0% |
+| output > 1.35x reference length ("addition") | 32% / 14% | 12% / 9% | 2% / 5% |
+| reference name missing from output (names / transliteration) | 42% / 36% | 48% / 36% | 15% / 8% |
+| source has a named entity | 75% / 68% | 78% / 68% | 75% / 68% |
+| source > 30 words | 15% / 11% | 22% / 11% | 18% / 11% |
+| omission (< 0.75x reference length) | 0% / 0% | 0% / 0% | 5% / 2% |
+| numbers changed | 0% / 0% | 0% / 0% | 0% / 1% |
+| none of the above (wrong sense / word choice) | 28% / 52% | 38% / 56% | 70% / 78% |
+
+- Root cause found for ru -> en: Hy-MT2 often starts its answer with the card prompt's own English instruction line, e.g. sentence 84 came back as "Note that you should only output the translated result without any additional explanation: Water ..." (also reworded as "It should be noted that only the translated result should be output, ..."). It was 7 of the 8 lowest ru -> en lines and most of the 13 "addition" lines among the lowest 40 (5 are left after the fix). The English template is used for every pair without Chinese, so X -> en / ja / ko / ru can have it too; the Chinese template (-> zh) showed no echo. Fix: `tinglongwu.hymt.strip_echo` removes a leading echoed instruction (English or Chinese form) from the output.
+- After that, the lowest lines are named entities transliterated differently from the reference (Олдсмобиль Интрига -> "奧爾斯莫比爾汽車“陰謀”號" vs "奧茲摩比 Intrigue"; Ивасаки -> 伊瓦薩基 vs 岩崎), long sentences (2x over-represented) and domain word sense (cricket "калитка" = wicket translated as "gate" / "入口"). Hy-MT2 1.8B has no knowledge of these; no prompt or decoding setting tried here fixes them.
+
+Fixes tried (ru -> zh-Hant / ru -> en, COMET / chrF / median s per sentence, CPU):
+
+| variant | ru -> zh-Hant | ru -> en | CPU |
+|---|---|---|---|
+| card prompt, Q4_K_M (shipped, before) | 0.8696 / 25.14 / 1.36 | 0.8543 / 58.25 / 1.55 | EPYC 9V45 |
+| prompt names the source language (`src`, before echo fix) | 0.8688 / 25.49 / 2.46 | 0.8486 / 57.90 / 2.83 | Xeon 6975P-C |
+| **card prompt + echo fix (shipped by #1351)** | **0.8696 / 25.14 / 1.77** | **0.8613 / 58.51 / 1.96** | EPYC 9V74 |
+| Q8_0 GGUF + echo fix (`q8`) | 0.8749 / 25.86 / 4.38 | 0.8605 / 58.40 / 5.19 | Xeon 6975P-C |
+| card prompt + echo fix, rerun (baseline of the 7B run) | 0.8696 / 25.14 / 2.26 | 0.8613 / 58.51 / 2.55 | EPYC 7763 |
+| opt-in Hy-MT2-7B Q4_K_M + echo fix (`7b`, `tlwu-setup --hymt7b`) | 0.8765 / 26.14 / 10.68 | 0.8759 / 62.89 / 10.47 | Xeon 6975P-C |
+
+- Echo fix: ru -> en +0.0070 COMET (+0.26 chrF); ru -> zh-Hant identical to the last digit (greedy decoding gives the same text on every CPU, so the difference is only the fix). It changes no model call, only two regex substitutions on the output, so speed is unchanged; the s/sentence columns differ because each job got another runner CPU.
+- Naming the source language: slightly worse on both (-0.0008 / -0.0057), ruled out.
+- Q8_0: +0.0053 on ru -> zh-Hant, -0.0008 on ru -> en against the fixed Q4_K_M, below the +0.008 bar on both, and the file is about 1.9x the size of Q4_K_M (memory-bound on the CPU, #1198 measured the quant speeds); ruled out. Q5_K_M / Q6_K were not measured.
+- Hy-MT2-7B (run [44034316922](https://github.com/sunososobro-hub/tinglongwu/actions/runs/44034316922), commit 49eb2b6, `variants=card,7b`): +0.0069 COMET / +1.00 chrF on ru -> zh-Hant and +0.0146 COMET / +4.38 chrF on ru -> en against the 1.8B in the same run. The bigger model mostly fixes names and transliteration on ru -> en ("reference name missing" among all 200: 36% -> 28%; "Jamie Sиминоff" -> "Jamie Siminoff"). It does not fix domain senses: the cricket line (калитка = wicket) is still the lowest ru -> zh-Hant line ("大門"). The 7B is about 4.6x slower per sentence on the CPU (10.7 vs 2.3 s median, on different runner CPUs), so it fails the "no more than 10% slower" bar as a default. It stays opt-in for GPUs (#279) and is the best Hy-MT2 option for Russian sources. The +0.008 COMET bar is met on ru -> en but not on ru -> zh-Hant (+0.0069).
+- Not reached: COMET >= 0.88 on ru -> zh-Hant (1.8B 0.870, 7B 0.877) and ru -> en (1.8B 0.861, 7B 0.876). Even the 7B, about 4x the parameters, stays below 0.88 on both. On ru -> zh-Hant it is within 0.003 of Google Cloud Translation (0.879, full devtest). Everything tried within the Hy-MT2 family is measured: prompt, quantization, 1.8B vs 7B, and temperature (#107). The 0.88 target therefore needs a different model family, not a setting.
 
 ### Hy-MT2 sampling temperature (#107)
 
@@ -220,3 +260,22 @@ What this shows:
 - No quant is faster than Q4_K_M by more than the noise without losing chrF. Q4_K_S is 9% faster at the median but slower at p90 and 1.4 chrF lower; Q2_K loses 8.8 chrF. The 3-bit and IQ quants are slower on this CPU (more dequantization work per token on 2 physical cores).
 - Alone, the MT step is 1.35 s per line whatever the thread split. Under load the split only moves time between Whisper and MT: mt-heavy makes MT 28% faster than cpu-mode but Whisper 62% slower, so the line is not faster.
 - Together with the settings sweep above: neither Whisper settings, MT threads nor MT quants reach a 30% lower p50 at the #745 quality limits on a 4 vCPU CPU. The shipped CPU mode keeps Q4_K_M and the #1198 thread split. A larger cut needs a different, smaller MT model, which needs its own chrF / COMET eval first.
+
+## Offline topic notes: default model bake-off (#1378, #595, #610)
+
+Which small instruct model should write the offline meeting notes (`--topics MODEL.gguf`, #609)? `topic-bakeoff` run [44038256031](https://github.com/sunososobro-hub/tinglongwu/actions/runs/44038256031) (commit 6ea1591), one GitHub-hosted 4 vCPU runner per model (the runner CPU is in each row), Q4_K_M GGUFs, the app's own prompt and parser (`tinglongwu.topics`, greedy, 220 tokens). Quality: 25 fixed segments (10 zh, 10 en, 5 ru) scored on key facts present, invented numbers (a number in the notes that is not in the transcript) and output language = transcript language. Speed: one ~5-minute topic (816 words) summarized with the app's thread count (`cpus // 4` = 1 thread on 4 vCPU) at the lowest thread priority while 2 cores are kept busy like live ASR + MT. Peak RAM = the process's peak RSS minus the RSS before the model loaded (llama.cpp's mapped file plus its repacked CPU weights). Budget from the issue: < 60 s per 5-minute topic, < 3 GB RAM, subtitle probe p50 within +10%, plus the quality floor (right language in >= 90% of segments, >= 60% of key facts in every language).
+
+| model (licence) | runner CPU | file MB | peak RAM MB | s / 5-min topic | s / short topic | zh facts | en facts | ru facts | invented numbers | right language | subtitle p50 | budget |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Qwen3-4B-Instruct-2507 (Apache-2.0) | Xeon 6975P-C | 2497 | 5066 | 218.1 | 28.5 | 0.84 | 1.00 | 1.00 | 2/25 | 24/25 | +1.9% | over: time, RAM |
+| Llama-3.2-3B-Instruct (Llama 3.2) | EPYC 9V45 | 2019 | 4062 | 112.6 | 10.7 | 0.78 | 0.94 | 0.62 | 1/25 | 21/25 | +1.6% | over: time, RAM, quality |
+| Qwen2.5-1.5B-Instruct (Apache-2.0) | EPYC 9V74 | 1117 | 2067 | 73.0 | 5.3 | 0.46 | 0.79 | 0.00 | 2/25 | 15/25 | +0.4% | over: time, quality |
+| Llama-3.2-1B-Instruct (Llama 3.2) | EPYC 7763 | 808 | 1680 | 106.0 | 5.8 | 0.42 | 0.88 | 0.20 | 3/25 | 15/25 | -2.1% | over: time, quality |
+| gemma-3-1b-it (Gemma) | Xeon 6975P-C | 806 | 1219 | 82.4 | 8.8 | 0.14 | 0.72 | 0.00 | 4/25 | 11/25 | +1.4% | over: time, quality |
+
+What this shows:
+- No candidate meets the CPU budget. The 1-1.5B models are fast enough per short topic but write Chinese and Russian meetings up in English (10-14 of 25 segments in the wrong language, ru key facts 0.00-0.20), so their notes are not usable for zh / ru users. Only the 3-4B models keep the transcript's language and its facts.
+- Default model: **Qwen3-4B-Instruct-2507 Q4_K_M** (best quality: 24/25 in the right language, every en / ru key fact, 0.84 zh; Apache-2.0; pinned in `tinglongwu_setup/manifest.json` as `topics-qwen3-4b-2507`). On a 4 vCPU CPU with the app's single summarizer thread it needs about 3.6 minutes per 5-minute topic and ~5 GB RAM, so topics queue up during a meeting and finish after it. Recommendation: on by default only with a GPU; on CPU-only PCs an opt-in, with the notes arriving after the meeting.
+- Timings move with the runner CPU (gemma-3-1b: 40-82 s per 5-minute topic across three runs of the same code), so compare the s / topic columns within ~2x, not to the second. The synthetic subtitle probe (SHA-256 work standing in for ASR/MT, not the real pipeline) stays within +2% for every model; the real ASR/MT path was not measured here.
+
+Reproduce: dispatch `topic-bakeoff` (input `candidates`, empty = all), or locally `python scripts/topic_bakeoff.py --fetch qwen3-4b-2507 --dir cand` then `python scripts/topic_bakeoff.py --model qwen3-4b-2507=cand/qwen3-4b-2507/Qwen3-4B-Instruct-2507-Q4_K_M.gguf --out r.json`; the per-segment notes are in the job log.

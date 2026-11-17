@@ -12,6 +12,16 @@ from tinglongwu.sink import Result
 MAIN_BAR_MAX_W = 560  # #1028: the chat-style main window's bottom bar (mic / floating / freeze toggles + Start)
 
 
+def _pick_meeting(a):
+    """#1343: a fresh install starts in the video (listen only) scene; pick Meeting like a user would."""
+    from tinglongwu.gui.core import SCENES
+
+    a.scene_combo.current(SCENES.index("meeting"))
+    a.scene_combo.event_generate("<<ComboboxSelected>>")
+    a.root.update()
+    assert a.settings["scene"] == "meeting"
+
+
 def test_queue_sink_final():
     q = queue.Queue()
     core.QueueSink(q).write(Result("ru", "privet", None, "你好", "zh"))
@@ -381,6 +391,29 @@ def test_log_follows_newest_unless_scrolled_up(gui_app):
     assert a.log_text.dlineinfo("end-1c") is not None and _log(a).endswith("newest")
 
 
+def test_log_follows_each_line_of_a_fast_feed_1384(gui_app):
+    """#1384: 100 lines fed one per poll with no idle in between; the newest is on screen after every line."""
+    a = gui_app
+    a.toggle()
+    a.root.update()
+    for i in range(100):
+        a.q.put(("final", f"source {i} " * 6, f"translated line {i} " * 6))
+        a.poll()
+        assert a.log_text.dlineinfo("end-1c") is not None, f"line {i} not visible"
+    a.log_text.yview("5.0")  # scrolling up pauses following
+    a.root.update()
+    top = a.log_text.index("@0,0")
+    a.q.put(("final", "x", "while reading"))
+    a.poll()
+    a.root.update()
+    assert a.log_text.index("@0,0") == top
+    a.log_text.yview_moveto(1.0)  # back at the bottom resumes it
+    a.root.update()
+    a.q.put(("final", "y", "resumed"))
+    a.poll()
+    assert a.log_text.dlineinfo("end-1c") is not None
+
+
 def test_log_font_buttons_and_pause(gui_app):
     a = gui_app
     w0 = a.root.winfo_reqwidth()
@@ -546,6 +579,7 @@ def test_bar_mode_pair_and_status_dot(gui_app, monkeypatch):
     a = gui_app
     runs = _record_runs(a, monkeypatch)
     monkeypatch.setattr(app, "meeting_cable", lambda: "CABLE Input (VB-Audio Virtual Cable)")  # no "no CABLE" panel
+    _pick_meeting(a)
     assert not hasattr(a, "v_mode")
     assert not [w for w in a.bar.winfo_children() if w.winfo_class() == "TRadiobutton"]
     a.v_target.set("en")
@@ -594,6 +628,7 @@ def test_one_click_start_loading_then_ready_then_stop(gui_app, monkeypatch):
 
     a = gui_app
     runs = _record_runs(a, monkeypatch)
+    _pick_meeting(a)
     assert _btn(a) == ("Start", "normal")
     a.v_target.set("zh-tw")
     a.both_btn.invoke()  # click 1
