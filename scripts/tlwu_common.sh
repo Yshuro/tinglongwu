@@ -130,14 +130,89 @@ tlwu_ncpu() {  # online CPU cores (macOS + Linux); TLWU_NCPU_FALLBACK when unkno
   printf '%s' "$n"
 }
 TLWU_NCPU_FALLBACK=2
+# #1356: Apple Silicon takes the wheel this project builds in CI (.github/workflows/llama-wheel-mac.yml) and publishes
+# on the pre-release <TLWU_LLAMA_WHEEL_TAG_PREFIX><version>; the version is the pin in the requirements file, nothing
+# else names it. Any failure (no release, download, checksum, pip, import) leaves the old path below to run.
+TLWU_LLAMA_PKG="llama-cpp-python"
+TLWU_LLAMA_WHEEL_BASE_DEFAULT="https://github.com/sunososobro-hub/tinglongwu/releases/download"
+TLWU_LLAMA_WHEEL_TAG_PREFIX="wheels-llama-cpp-python-"
+TLWU_LLAMA_WHEEL_SUMS="SHA256SUMS.txt"
+TLWU_LLAMA_WHEEL_PLATFORM_MAC_ARM64="macosx_arm64"
+TLWU_LLAMA_SUMS_TIMEOUT_S=30     # curl --max-time for the checksum file (under 1 kB)
+TLWU_LLAMA_WHEEL_TIMEOUT_S=120   # curl --max-time for the wheel; slower than that, the old path runs
+TLWU_SHA256_HEX_LEN=64
+tlwu_llama_pin() {  # tlwu_llama_pin REQUIREMENTS_FILE -> llama-cpp-python==X.Y.Z (empty when the file has no pin)
+  grep -E "^$TLWU_LLAMA_PKG==" "$1" 2>/dev/null | head -n1 | tr -d '[:space:]'
+}
+tlwu_llama_version() {  # tlwu_llama_version REQUIREMENTS_FILE -> X.Y.Z
+  local pin; pin="$(tlwu_llama_pin "$1")"
+  printf '%s' "${pin#*==}"
+}
+tlwu_llama_wheel_tag() {  # tlwu_llama_wheel_tag REQUIREMENTS_FILE -> release tag that carries the wheel of that pin
+  local v; v="$(tlwu_llama_version "$1")"
+  [ -n "$v" ] || return 1
+  printf '%s%s' "$TLWU_LLAMA_WHEEL_TAG_PREFIX" "$v"
+}
+tlwu_llama_wheel_platform() {  # platform with a project-built wheel, or empty (TLWU_LLAMA_WHEEL_PLATFORM: tests)
+  if [ -n "${TLWU_LLAMA_WHEEL_PLATFORM+x}" ]; then printf '%s' "$TLWU_LLAMA_WHEEL_PLATFORM"; return 0; fi
+  [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ] && printf '%s' "$TLWU_LLAMA_WHEEL_PLATFORM_MAC_ARM64"
+  return 0
+}
+tlwu_llama_wheel_glob() {  # tlwu_llama_wheel_glob VERSION PLATFORM -> case pattern of that platform's wheel file name
+  case "$2" in
+    "$TLWU_LLAMA_WHEEL_PLATFORM_MAC_ARM64") printf 'llama_cpp_python-%s-*-macosx_*_arm64.whl' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+tlwu_sha256() {  # tlwu_sha256 FILE -> lowercase hex digest (macOS: shasum; Linux: sha256sum)
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+  else sha256sum "$1" | cut -d' ' -f1; fi
+}
+tlwu_install_llama_prebuilt() {  # tlwu_install_llama_prebuilt PYTHON REQUIREMENTS_FILE -> 0 = installed and importable
+  local py="$1" req="$2" plat ver tag glob base tmp line want name got rc=1
+  [ "${TLWU_LLAMA_NO_PREBUILT:-}" = "1" ] && return 1
+  plat="$(tlwu_llama_wheel_platform)"; [ -n "$plat" ] || return 1
+  ver="$(tlwu_llama_version "$req")"; tag="$(tlwu_llama_wheel_tag "$req")" || return 1
+  glob="$(tlwu_llama_wheel_glob "$ver" "$plat")" || return 1
+  base="${TLWU_LLAMA_WHEEL_BASE:-$TLWU_LLAMA_WHEEL_BASE_DEFAULT}/$tag"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/tlwu_llama_wheel.XXXXXX")" || return 1
+  while :; do   # one pass; `break` = give up on the prebuilt wheel
+    curl -fsSL --retry 2 --max-time "$TLWU_LLAMA_SUMS_TIMEOUT_S" -o "$tmp/$TLWU_LLAMA_WHEEL_SUMS" \
+      "$base/$TLWU_LLAMA_WHEEL_SUMS" 2>/dev/null || { echo "    prebuilt wheel: no checksum file at $base"; break; }
+    want=""; name=""
+    while read -r want name; do   # "<sha256>  <file name>" lines; take this platform's wheel
+      name="${name#\*}"
+      # shellcheck disable=SC2254
+      case "$name" in */*|*..*) ;; $glob) break ;; esac
+      want=""; name=""
+    done < "$tmp/$TLWU_LLAMA_WHEEL_SUMS"
+    case "$want" in *[!0-9a-f]*) want="" ;; esac
+    [ "${#want}" = "$TLWU_SHA256_HEX_LEN" ] && [ -n "$name" ] \
+      || { echo "    prebuilt wheel: $TLWU_LLAMA_WHEEL_SUMS lists no $plat wheel of $ver"; break; }
+    curl -fsSL --retry 2 --max-time "$TLWU_LLAMA_WHEEL_TIMEOUT_S" -o "$tmp/$name" "$base/$name" 2>/dev/null \
+      || { echo "    prebuilt wheel: download of $name failed"; break; }
+    got="$(tlwu_sha256 "$tmp/$name")"
+    [ "$got" = "$want" ] || { echo "    prebuilt wheel: SHA256 mismatch for $name (got ${got:-none}), not used"; break; }
+    "$py" -m pip install "$tmp/$name" || { echo "    prebuilt wheel: pip could not install $name"; break; }
+    if "$py" -c "import llama_cpp"; then rc=0; echo "    prebuilt wheel installed: $name (SHA256 ok)"
+    else
+      echo "    prebuilt wheel: installed but does not import; removing it"
+      "$py" -m pip uninstall -y "$TLWU_LLAMA_PKG" >/dev/null 2>&1
+    fi
+    break
+  done
+  rm -rf "$tmp"
+  return "$rc"
+}
 tlwu_install_llama() {  # tlwu_install_llama PYTHON REQUIREMENTS_FILE
   local py="$1" req="$2" pin
+  tlwu_install_llama_prebuilt "$py" "$req" && return 0
   "$py" -m pip install -r "$req" && return 0
-  pin="$(grep -E '^llama-cpp-python==' "$req" | head -n1 | tr -d '[:space:]')"
+  pin="$(tlwu_llama_pin "$req")"
   [ -n "$pin" ] || return 1
   echo "    index wheel failed; building $pin from the PyPI sdist (a few minutes) ..."
   CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(tlwu_ncpu)}" \
-    "$py" -m pip install --no-binary llama-cpp-python "$pin"
+    "$py" -m pip install --no-binary "$TLWU_LLAMA_PKG" "$pin"
 }
 # #1341: the same install in the background, so the installer can download the models (network) while the engine
 # compiles (CPU). Output goes to LOG; tlwu_wait_llama LOG waits, prints that output and returns the install's exit code.
