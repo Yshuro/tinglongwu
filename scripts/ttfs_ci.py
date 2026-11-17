@@ -18,6 +18,24 @@ import ttfs  # noqa: E402
 INSTALLERS = {"linux": "scripts/install.sh", "macos": "scripts/mac_install.sh", "windows": None}
 
 
+OUTPUT_LOG = "ttfs_output.log"  # #1341: installer output with per-line seconds, next to --out
+
+
+def print_output_log(path):
+    """#1341: the timed installer output in the job log (a folded group on GitHub Actions), so a slow run can be read
+    line by line without downloading an artifact."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")   # a console that cannot print a character must not fail the job
+    print("::group::installer output with seconds (%s)" % OUTPUT_LOG)
+    print(text, end="")
+    print("::endgroup::")
+
+
 def windows_commands(directory, setup_exe):
     """#934: the released wizard run silently into DIRECTORY (cmd.exe commands). The wizard installs and downloads the
     models in one go, so `install` is the whole wizard run and `setup` only prints its install.log (the download
@@ -69,7 +87,27 @@ def summary_text(os_name, doc, install_mb=None):
             % (os_name, num("ttfs_seconds"), num("excl_download_seconds"), ttfs.TTFS_BUDGET_S, ttfs.BASELINE_MBPS))
     if install_mb is not None:
         text += "install_size_mb: %.1f\n" % install_mb
-    return text
+    return text + phase_text(doc)
+
+
+def phase_text(doc):
+    """#1341: where the seconds go, as text for the job log and summary: the three measured parts, then per installer
+    run its steps (`==> ` lines) and the output lines that were followed by the longest wait. "" when DOC has none."""
+    if not any(doc.get(k) for k in ("install_phases", "setup_phases")):
+        return ""
+
+    def num(k):
+        return "n/a" if doc.get(k) is None else "%.1f" % doc[k]
+    out = ["", "install_seconds: %s  setup_seconds: %s  first_subtitle_seconds: %s"
+           % (num("install_seconds"), num("setup_seconds"), num("first_subtitle_seconds"))]
+    for key, title in (("install_phases", "install (models skipped)"), ("setup_phases", "setup (with models)")):
+        rep = doc.get(key) or {}
+        out.append("phases, %s:" % title)
+        out += ["  %7.1f s  %s" % (p["seconds"], p["name"]) for p in rep.get("phases", [])]
+        if rep.get("slow_lines"):
+            out.append("slowest lines, %s (seconds until the next output line):" % title)
+            out += ["  %7.1f s  %s" % (r["seconds"], r["line"]) for r in rep["slow_lines"]]
+    return "\n".join(out) + "\n"
 
 
 def setup_time_report(directory, install_seconds, out_path):
@@ -103,7 +141,9 @@ def main(argv=None):
     if a.os == "windows" and not a.setup_exe:
         ap.error("--setup-exe is required for --os windows")
     install, setup, tlwu = commands(a.os, a.dir, a.setup_exe)
-    rc = ttfs.main(["--install", install, "--setup", setup, "--tlwu", tlwu, "--out", a.out])
+    log = os.path.join(os.path.dirname(os.path.abspath(a.out)), OUTPUT_LOG)
+    rc = ttfs.main(["--install", install, "--setup", setup, "--tlwu", tlwu, "--out", a.out, "--log", log])
+    print_output_log(log)
     import json
     try:
         with open(a.out, encoding="utf-8") as f:
