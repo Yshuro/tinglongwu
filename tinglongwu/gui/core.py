@@ -75,7 +75,7 @@ def restart_needed(at_start: dict, now: dict) -> list[str]:
 
 LANGS = SOURCE_LANGS  # auto, focus ja/en/ru, zh, then the experimental ones (#58)
 TARGETS = ["zh-tw", "zh-cn", "en", "ja", "ko", "es", "fr", "de", "th", "vi", "id"]  # #1163: Hy-MT2 direct targets
-ENGINES = ["auto", "hymt"]  # #276, #471: Hy-MT2 is the only engine offered (OPUS removed)
+ENGINES = ["auto", "hymt", "hymt7b"]  # #276, #471: Hy-MT2 only (OPUS removed); #1351: the opt-in 7B (GPU, never auto)
 # auto = what hwprobe recommends for this PC; fast / balanced / quality trade speed for accuracy on the same
 # hardware; manual = the Engine + Speech model boxes decide (#81)
 QUALITIES = ["auto", "fast", "balanced", "quality", "manual"]
@@ -631,8 +631,8 @@ def model_labels(mdir=None, ram_gb: float | None = None) -> list[str]:
             + [m + heavy(m) for m in MODELS if m not in have])  # #739: a missing model downloads on the first Start
 
 
-_ENGINE_DIR = {"hymt": "hymt2-1.8b"}  # models/<dir> per engine (auto needs no model of its own); #471: no opus
-_ENGINE_HINT = {"hymt": "tlwu-setup --hymt"}
+_ENGINE_DIR = {"hymt": "hymt2-1.8b", "hymt7b": "hymt2-7b"}  # models/<dir> per engine (auto needs no model of its own); #471: no opus
+_ENGINE_HINT = {"hymt": "tlwu-setup --hymt", "hymt7b": "tlwu-setup --hymt7b"}
 
 
 def engine_labels(mdir=None) -> list[str]:
@@ -642,6 +642,24 @@ def engine_labels(mdir=None) -> list[str]:
     d = models_dir(str(mdir) if mdir else None)
     return [choice_label("engine", e) if e == "auto" or (d / _ENGINE_DIR[e]).is_dir() else f"{e} ({_ENGINE_HINT[e]})"
             for e in ENGINES]
+
+
+def engine_model_missing(s: dict, mdir=None) -> str | None:
+    """#1351: the localized line to show instead of starting when Quality is Manual, Engine is the opt-in hymt7b and
+    its model is not downloaded (the CLI would exit with a setup command the GUI never shows, #885); else None.
+    hymt (1.8B) is not checked: --mt-pending shows source text while it downloads (#1375)."""
+    from ..hymt import hymt_path
+    from ..i18n import t
+    from ..models import models_dir
+
+    if s.get("quality") != "manual" or s.get("engine") != "hymt7b":
+        return None
+    try:
+        if hymt_path(models_dir(str(mdir) if mdir else None), "7b").is_file():  # the file make_translator loads
+            return None
+    except Exception:  # noqa: BLE001 - an unreadable path: let the run report its own error
+        return None
+    return t("gui_error_hymt7b_missing")
 
 
 def engine_from_label(label: str) -> str:
