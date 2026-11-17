@@ -57,3 +57,22 @@ def test_short_ru_terms_do_not_match_longer_words():
     assert not {"лог", "логи"} & hit("Это логика программы.")
     assert "прод" in hit("Выкатили в проде.") and "баг" in hit("Нашли багов много.")
     assert "логи" in hit("Посмотри логи.") and "ветка" in hit("Создал ветку.")
+
+
+def test_ru_terms_do_not_fire_on_other_words_with_the_same_stem_1425():
+    g = glossary.load_builtin("ru")
+    for s in ("Мы поехали по железной дороге.", "Железнодорожный вокзал рядом.", "Это тесто для пиццы."):
+        assert g.relevant(s) == [], s
+    for s in ("У нас новое железо.", "на этом железе"):
+        assert [e.main for e in g.relevant(s)] == ["железо"], s
+    for s in ("тесты упали", "в тестах"):
+        assert [e.main for e in g.relevant(s)] == ["тесты"], s
+
+
+def test_ru_noun_forms_still_fire_1425():
+    g = glossary.load_builtin("ru")
+    hit = lambda text: {e.main for e in g.relevant(text)}  # noqa: E731
+    for text, term in (("Это деплой.", "деплой"), ("после деплоя", "деплой"), ("нужно ревью", "ревью"),
+                       ("в ветках", "ветка"), ("новыми ветками", "ветка"), ("в репозитории", "репозиторий"),
+                       ("об отладке", "отладка"), ("отладками", "отладка")):
+        assert term in hit(text), (text, term)
