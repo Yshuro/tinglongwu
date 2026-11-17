@@ -180,13 +180,14 @@ say "5/8 英文語音 Kokoro（獨立環境，因為它含 GPL 的 espeak，不�
 if [ -n "${TLWU_SKIP_MODELS:-}" ]; then info "TLWU_SKIP_MODELS set: skipping Kokoro and model downloads (steps 5-6)"
 else
 # #276/#301: Hy-MT2 1.8B is the only default translation engine (runs on the CPU here): llama-cpp-python + the GGUF.
-# #420: the CPU-index arm64 wheel can be a corrupt zip; tlwu_install_llama then builds the PyPI sdist with the Xcode
-# command line tools (a few minutes). #1341: that build starts here, in the background, and runs while the voice
-# and the models download (steps 5-6); step 6 waits for it. Its output is printed there.
+# #1356: Apple Silicon first takes the wheel this project builds in CI (SHA256-checked release asset, seconds).
+# #420: without it, the CPU-index arm64 wheel can be a corrupt zip; tlwu_install_llama then builds the PyPI sdist with
+# the Xcode command line tools (a few minutes). #1341: the install starts here, in the background, and runs while the
+# voice and the models download (steps 5-6); step 6 waits for it. Its output is printed there.
 # shellcheck source=tlwu_common.sh
 . "$DIR/scripts/tlwu_common.sh"
 LLAMA_LOG="${TMPDIR:-/tmp}/tlwu_llama_install.$$.log"
-info "背景安裝翻譯引擎 Hy-MT2（llama-cpp-python，可能要編譯幾分鐘；同時下載語音與模型）..."
+info "背景安裝翻譯引擎 Hy-MT2（llama-cpp-python；沒有現成安裝檔時要編譯幾分鐘；同時下載語音與模型）..."
 tlwu_install_llama_bg .venv/bin/python requirements-llama-cpu.txt "$LLAMA_LOG"
 if [ ! -x "$KOKORO_VENV/bin/python" ]; then
   "$PYBREW" -m venv "$KOKORO_VENV" || die "建立 $KOKORO_VENV 失敗。"

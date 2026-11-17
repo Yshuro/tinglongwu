@@ -12,6 +12,9 @@ ROOT = Path(__file__).resolve().parent.parent
 COMMON_SH = ROOT / "scripts" / "tlwu_common.sh"
 BASH = shutil.which("bash")
 pytestmark = pytest.mark.skipif(BASH is None, reason="bash not available")
+# #1356: these tests cover the index-wheel / sdist path; the prebuilt wheel (a download on Apple Silicon) is covered by
+# tests/test_install_llama_prebuilt.py and switched off here so a Mac runs them without the network.
+NO_PREBUILT = {"TLWU_LLAMA_NO_PREBUILT": "1"}
 
 STUB = """#!/bin/bash
 echo "$@" >> "$STUB_LOG"
@@ -31,7 +34,7 @@ def _run(tmp_path, wheel_rc, sdist_rc=0):
     log = tmp_path / "log"
     r = subprocess.run(
         [BASH, "-c", f'. "{COMMON_SH}"; tlwu_install_llama "{py}" "{req}"'],
-        env={"PATH": "/usr/bin:/bin", "STUB_LOG": str(log), "WHEEL_RC": str(wheel_rc), "SDIST_RC": str(sdist_rc)},
+        env={"PATH": "/usr/bin:/bin", "STUB_LOG": str(log), "WHEEL_RC": str(wheel_rc), "SDIST_RC": str(sdist_rc), **NO_PREBUILT},
         capture_output=True, text=True,
     )
     return r.returncode, log.read_text().splitlines()
@@ -61,7 +64,8 @@ def _sh(tmp_path, script, **env):
     req.write_text("llama-cpp-python==0.3.36\n")
     log = tmp_path / "log"
     r = subprocess.run([BASH, "-c", f'. "{COMMON_SH}"; PY="{py}"; REQ="{req}"; OUT="{tmp_path}/bg.log"; {script}'],
-                       env={"PATH": "/usr/bin:/bin", "STUB_LOG": str(log), **env}, capture_output=True, text=True)
+                       env={"PATH": "/usr/bin:/bin", "STUB_LOG": str(log), **NO_PREBUILT, **env}, capture_output=True,
+                       text=True)
     envlog = Path(str(log) + ".env")
     return r, envlog.read_text().splitlines() if envlog.exists() else []
 
