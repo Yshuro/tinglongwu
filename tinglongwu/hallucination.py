@@ -83,6 +83,43 @@ def _best_cover(norm: str) -> tuple[float, bool]:
     return best, best_strong
 
 
+# #1369: on a music bed Whisper writes a sound tag instead of speech ("Music. Music.", "[MUSIC PLAYING]", "(upbeat
+# music)", "♪♪"), which the owner's field test showed as a subtitle line ("音樂。音樂。"). A text made only of such
+# tags is not speech, whatever its energy: dropped. A tag inside real speech keeps the line.
+MUSIC_WORDS = ("music", "musik", "musique", "música", "musica", "музыка", "音樂", "音乐", "音楽", "음악")
+# words of a longer sound description ("[soft instrumental background music]"); a bracketed sentence that only
+# mentions music ("(we all love this music)") has other words and is kept as speech
+SOUND_WORDS = {"soft", "gentle", "upbeat", "dramatic", "calm", "light", "loud", "quiet", "slow", "fast", "sad",
+               "happy", "tense", "mysterious", "epic", "ambient", "instrumental", "background", "electronic", "classical",
+               "piano", "guitar", "orchestral", "jazz", "rock", "pop", "playing", "plays", "continues", "fades",
+               "intro", "outro", "theme", "and", "in", "out", "up", "down", "the"}
+_MUSIC_ONLY = re.compile(r"(?:%s)+" % "|".join(MUSIC_WORDS))
+_TAG = re.compile(r"[\[(（【][^\])）】]*[\])）】]")
+_NOTES = re.compile(r"[♪♫♬♩🎵🎶]")
+
+
+def _music_tag(tag: str) -> bool:
+    """A bracketed sound description: a music word, and every other word a sound-description word ("(upbeat music)",
+    "[MUSIC PLAYING]"; not speech in brackets such as "(I love music)" or "(I love music.)")."""
+    inner = tag[1:-1].strip()
+    if _NOTES.search(inner) and not _norm(_NOTES.sub("", inner)):
+        return True  # notes only, e.g. "[♪♪]"
+    words = [_norm(w) for w in inner.split()]
+    described = all(w in SOUND_WORDS or _MUSIC_ONLY.fullmatch(w) for w in words if w)
+    return described and not re.search(r"[.!?。！？]$", inner) and bool(_MUSIC_ONLY.search(_norm(inner)))
+
+
+def is_music_tag(text: str) -> bool:
+    """#1369: True if `text` is only music tags / notes (no words of speech left once they are removed)."""
+    tags = _TAG.findall(text)
+    if not all(_music_tag(g) for g in tags):
+        return False  # another tag ("[Applause]") or speech in brackets ("(I love music.)") is not ours to judge
+    rest = _norm(_NOTES.sub("", _TAG.sub("", text)))
+    if not rest:
+        return bool(tags or _NOTES.search(text))
+    return bool(_MUSIC_ONLY.fullmatch(rest))
+
+
 def is_hallucination(text: str, rms: float | None = None, no_speech: float = 0.0, strict: bool = False) -> bool:
     """True if `text` is (mostly) a known Whisper credit/sign-off hallucination.
 
@@ -90,6 +127,8 @@ def is_hallucination(text: str, rms: float | None = None, no_speech: float = 0.0
     strict (#1070, speak leg): the text is spoken into someone else's meeting, so silence beats a wrong sentence:
     any STRONG phrase anywhere drops it. WEAK phrases keep the energy rule: "Thank you" / "謝謝大家" are real
     things people say in a meeting (#312), so they are dropped only when the segment is quiet or no-speech."""
+    if is_music_tag(text):
+        return True
     n = _norm(text)
     if not n:
         return False
