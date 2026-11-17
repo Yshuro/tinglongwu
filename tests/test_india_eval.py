@@ -245,3 +245,162 @@ def test_load_audio_downmixes_and_resamples_to_16k(tmp_path):
     x = ie.load_audio(tmp_path / "a.flac")
     assert x.dtype == np.float32 and x.ndim == 1 and abs(len(x) - 16000) <= 1
     assert 0.6 < float(np.abs(x).max()) < 1.1
+
+
+# ---------- #655: hinglish group ----------
+
+def _info(rid, tags, gated=False, downloads=0):
+    return types.SimpleNamespace(id=rid, tags=tags, gated=gated, downloads=downloads)
+
+
+def test_hinglish_candidates_keep_only_open_ungated_hindi_english_audio_sets():
+    infos = [
+        _info("a/hinglish-asr", ["license:cc-by-4.0", "modality:audio"], downloads=5),
+        _info("b/code-switch-speech", ["license:apache-2.0", "task_categories:automatic-speech-recognition",
+                                       "language:hi", "language:en"], downloads=50),
+        _info("h/indic-multi", ["license:cc-by-4.0", "modality:audio", "language:hi", "language:en"],
+              downloads=900),  # hi + en tags alone: maybe separate monolingual clips, not code-switched
+        _info("j/hindi-tamil-code-switch", ["license:mit", "modality:audio", "language:hi", "language:ta"],
+              downloads=900),  # code-switched, but not with English
+        _info("i/es-codeswitch", ["license:mit", "modality:audio", "language:es", "language:en"], downloads=900),
+        _info("c/hinglish-gated", ["license:cc-by-4.0", "modality:audio"], gated="manual", downloads=900),
+        _info("d/hinglish-nc", ["license:cc-by-nc-4.0", "modality:audio"], downloads=900),
+        _info("e/hinglish-text", ["license:mit", "modality:text"], downloads=900),
+        _info("f/es-en-cs", ["license:mit", "modality:audio", "language:es", "language:en"], downloads=900),
+        _info("g/HingLish-tts", ["license:cc0-1.0", "modality:audio"], downloads=5),
+        _info("a/hinglish-asr", ["license:cc-by-4.0", "modality:audio"], downloads=5),  # same set from 2nd search
+    ]
+    assert ie.hinglish_candidates(infos) == ["b/code-switch-speech", "a/hinglish-asr", "g/HingLish-tts"]
+
+
+def test_open_licence_uses_the_candidate_rule():
+    assert ie.open_licence(["license:cc-by-nc-4.0", "license:cc-by-4.0"]) == "cc-by-4.0"
+    assert ie.open_licence(["license:cc-by-nc-4.0"]) == "cc-by-nc-4.0"
+    assert ie.open_licence(["modality:audio"]) == "unknown"
+
+
+def _wav(seconds):
+    np = pytest.importorskip("numpy")
+    sf = pytest.importorskip("soundfile")
+    b = io.BytesIO()
+    sf.write(b, np.zeros(int(16000 * seconds), dtype="float32"), 16000, format="WAV")
+    return b.getvalue()
+
+
+class HubApi:
+    def __init__(self, files, tags=("license:cc-by-4.0",)):
+        self.files, self.tags = files, list(tags)
+
+    def dataset_info(self, repo, revision=None):
+        return types.SimpleNamespace(sha="ab" * 20, tags=self.tags)
+
+    def list_repo_files(self, repo, repo_type=None, revision=None):
+        return list(self.files)
+
+
+def test_fetch_hinglish_from_takes_short_transcribed_test_clips(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    rows = [({"bytes": _wav(2.0), "path": "x.wav"}, "Mujhe yeh movie bahut pasand aayi"),
+            ({"bytes": _wav(30.0), "path": "y.wav"}, "too long"),           # > MAX_CLIP_S: skipped
+            ({"bytes": _wav(3.0), "path": "z.flac"}, "  "),                 # no transcript: skipped
+            ({"bytes": b"not audio", "path": "w.wav"}, "broken"),           # undecodable: skipped
+            ({"bytes": _wav(4.0), "path": "v.wav"}, "Kal meeting hai at ten")]
+    table = pa.table({"audio": [a for a, _ in rows], "transcription": [t for _, t in rows]})
+    fetched = []
+
+    def download(repo, f, repo_type=None, revision=None):
+        fetched.append(f)
+        return f
+
+    api = HubApi(["data/train-0.parquet", "data/test-00000.parquet", "README.md"])
+    got = ie.fetch_hinglish_from("o/hinglish", None, tmp_path, 10, api, download, lambda f: table)
+    assert fetched == ["data/test-00000.parquet"]  # only the test shard is downloaded
+    assert [r["ref_text"] for r in got] == ["Mujhe yeh movie bahut pasand aayi", "Kal meeting hai at ten"]
+    assert [r["id"] for r in got] == ["hinglish_001", "hinglish_002"]
+    assert got[0]["source"] == f"o/hinglish@{'ab' * 6}/row0" and got[1]["source"].endswith("/row4")
+    assert got[0]["lang"] == "hi" and got[0]["license"] == "cc-by-4.0"
+    assert (tmp_path / "hinglish" / "hinglish_002.wav").read_bytes() == rows[4][0]["bytes"]
+    # n caps the clips
+    assert len(ie.fetch_hinglish_from("o/hinglish", None, tmp_path, 1, api, download, lambda f: table)) == 1
+
+
+def test_fetch_hinglish_from_rejects_sets_without_audio_and_text(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    with pytest.raises(RuntimeError, match="no parquet files"):
+        ie.fetch_hinglish_from("o/x", None, tmp_path, 10, HubApi(["data.zip"]), lambda *a, **k: None, None)
+    with pytest.raises(RuntimeError, match="unexpected columns"):
+        ie.fetch_hinglish_from("o/x", None, tmp_path, 10, HubApi(["a.parquet"]), lambda *a, **k: "a",
+                               lambda f: pa.table({"text": ["hi"]}))
+
+
+def test_pick_columns_prefers_the_exact_audio_column():
+    assert ie.pick_columns(["audio_id", "audio", "text"]) == ("audio", "text")
+    assert ie.pick_columns(["audio_filepath", "transcription"]) == ("audio_filepath", "transcription")
+    assert ie.pick_columns(["path", "label"]) == (None, None)
+
+
+@pytest.mark.parametrize("tags,gated,why", [(["license:cc-by-nc-4.0"], False, "not in OPEN_LICENSES"),
+                                            ([], False, "'unknown' is not in OPEN_LICENSES"),
+                                            (["license:cc-by-4.0"], "manual", "gated set")])
+def test_fetch_hinglish_from_rejects_closed_sets_before_downloading(tmp_path, tags, gated, why):
+    """A HINGLISH_DATASET override gets the same open-set rule as the search, and nothing is downloaded."""
+    api = HubApi(["test.parquet"], tags=tags)
+    api.dataset_info = lambda repo, revision=None: types.SimpleNamespace(sha="ab" * 20, tags=tags, gated=gated)
+
+    def download(*a, **k):
+        raise AssertionError("downloaded a closed set")
+
+    with pytest.raises(RuntimeError, match=why):
+        ie.fetch_hinglish_from("o/x", None, tmp_path, 10, api, download, None)
+
+
+def test_fetch_hinglish_failure_is_recorded_not_raised(tmp_path, monkeypatch):
+    def boom(data, n):
+        raise RuntimeError("no open Hinglish speech set")
+
+    monkeypatch.setattr(ie, "fetch_hinglish", boom)
+    assert ie.main(["fetch", "--group", "hinglish", "--data", str(tmp_path)]) == 0
+    st = json.loads((tmp_path / "hinglish" / "status.json").read_text())
+    assert st == {"ok": False, "error": "RuntimeError: no open Hinglish speech set"}
+
+
+def test_fetch_hinglish_caps_at_10_clips_and_records_the_source(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake(data, n):
+        seen["n"] = n
+        return [{"id": "hinglish_001", "wav": "hinglish_001.wav", "lang": "hi", "ref_text": "kya haal hai",
+                 "source": "o/hinglish@abababababab/row3", "license": "cc-by-4.0"}]
+
+    monkeypatch.setattr(ie, "fetch_hinglish", fake)
+    assert ie.main(["fetch", "--group", "hinglish", "--data", str(tmp_path), "--n", "50"]) == 0
+    assert seen["n"] == 10
+    st = json.loads((tmp_path / "hinglish" / "status.json").read_text())
+    assert st == {"ok": True, "clips": 1, "source": "o/hinglish@abababababab", "license": "cc-by-4.0"}
+
+
+def test_run_hinglish_translates_like_hindi():
+    tr = FakeTr()
+    out = ie.run_group([{"id": "hinglish_001", "ref_text": "kya haal hai"}], "hinglish", FakeAsr(["क्या हाल है"]),
+                       tr, lambda r: [0.0] * 16000, clock())
+    assert out[0]["zh_direct"] == "zh(क्या हाल है)" and out[0]["zh_pivot"] == "zh(en(क्या हाल है))"
+    assert out[0]["zh_gold"] == "zh(kya haal hai)" and ("kya haal hai", "hi", "zh") in tr.calls
+
+
+def test_report_has_hinglish_rows_and_source(tmp_path, exact_chrf, capsys):
+    hg = [{"ref_text": "kal meeting hai", "asr": "kal meeting hai", "asr_s": 1.0, "audio_s": 2.0,
+           "zh_direct": "明天開會", "zh_direct_s": 0.3, "zh_pivot": "明天有會", "zh_pivot_s": 0.6,
+           "zh_gold": "明天開會", "zh_gold_s": 0.3}]
+    _write(tmp_path, "hinglish", hg)
+    (tmp_path / "hinglish.status.json").write_text(json.dumps(
+        {"ok": True, "clips": 1, "source": "o/hinglish@abababababab", "license": "cc-by-4.0"}))
+    assert ie.main(["report", str(tmp_path)]) == 0
+    s = json.loads((tmp_path / "summary.json").read_text("utf-8"))
+    by = {(r["group"], r["route"]): r for r in s["rows"]}
+    assert set(by) == {("hinglish", "zh_direct"), ("hinglish", "zh_pivot")}
+    assert by[("hinglish", "zh_direct")]["chrf_vs_gold_mt"] == 100.0 and by[("hinglish", "zh_pivot")]["chrf_vs_gold_mt"] == 0.0
+    assert by[("hinglish", "zh_direct")]["chrf_vs_human_zh"] is None and by[("hinglish", "zh_direct")]["asr_wer"] == 0.0
+    assert s["sources"] == {"hinglish": "o/hinglish@abababababab (licence cc-by-4.0)"}
+    out = capsys.readouterr().out
+    assert "Hinglish (Hindi-English code-switch) -> zh, direct | 1 |" in out
+    assert "hinglish source: o/hinglish@abababababab (licence cc-by-4.0)" in out
