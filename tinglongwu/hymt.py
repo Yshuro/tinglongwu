@@ -8,6 +8,7 @@ builds the same router with its own no-fallback base (#331).
 from __future__ import annotations
 
 import os
+import re
 import sys
 from collections import deque
 from pathlib import Path
@@ -77,6 +78,28 @@ def build_prompt(text: str, src: str, tgt: str, terms: list[tuple[str, str]] | N
         return (f"将以下文本翻译成{ZH_NAMES.get(tgt, tgt)}，注意只需要输出翻译后的结果，不要额外解释：\n\n{text}")
     return (f"Translate the following text into {EN_NAMES.get(tgt, tgt)}.\n"
             f"Note that you should only output the translated result without any additional explanation:\n\n{text}")
+
+
+# #1351: Hy-MT2 sometimes starts its answer with the card prompt's own instruction line (eval-flores run 44013625413,
+# ru->en: "Note that you should only output the translated result without any additional explanation: <translation>",
+# also reworded as "It should be noted that only the translated result should be output, ..."). Only a leading echo
+# that names the "translated result" / "额外解释" instruction is removed; a translation that merely says "note" stays.
+# one sentence (no "." / ":" inside) that says to output only the translated result/text, with no explanation
+_ECHO_EN = re.compile(r"^\s*(?:(?:please\s+)?note(?:\s+that)?|it\s+should\s+be\s+noted\s+that|you\s+should)[,:]?\s*"
+                      r"(?=[^.:\n]*\boutput\b)"
+                      r"[^.:\n]{0,40}?\bonly\b[^.:\n]{0,40}?\btranslated\s+(?:result|text)\b"
+                      r"[^.:\n]{0,40}?\b(?:without|no)\b[^.:\n]{0,40}?\bexplanations?\s*[.:]\s*", re.I)
+# the contextual form's instruction (build_prompt with `context`, #1258 eval only)
+_ECHO_ZH_CTX = re.compile(r"^\s*参考上面的信息[，,]\s*把下面的文本翻译成[^，,：:\n]{1,12}[，,]\s*注意不需要翻译上文[，,]\s*"
+                          r"也不要额外解释[。：:]\s*")
+_ECHO_ZH = re.compile(r"^\s*(?:注意)?[，,：:]?\s*只需要?[输輸]出翻[译譯][^。：:\n]{0,12}?(?:额外|額外)(?:解释|解釋)[。：:]\s*")
+
+
+def strip_echo(out: str) -> str:
+    """Drop the card instruction line when the model repeats it before (or instead of) the translation."""
+    for rx in (_ECHO_EN, _ECHO_ZH, _ECHO_ZH_CTX):
+        out = rx.sub("", out, count=1)
+    return out.strip()
 
 
 def zh_script_guard(src_text: str, out: str, max_words: int = 4) -> str:
@@ -149,7 +172,7 @@ class HyMtTranslator(Translator):
         r = self.llm.create_chat_completion(
             [{"role": "user", "content": build_prompt(text, src, tgt, self._terms(text, tgt, ctx), context)}],
             max_tokens=max_tokens_for(text), **sampling())
-        out = strip_unk(clean_output(r["choices"][0]["message"]["content"] or ""))
+        out = strip_echo(strip_unk(clean_output(r["choices"][0]["message"]["content"] or "")))
         if tgt == "zh":
             out = zh_convert(out, self.zh_variant)
             if self.glossary:
