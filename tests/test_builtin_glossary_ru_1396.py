@@ -133,6 +133,17 @@ def test_ru_zalit_irregular_forms_and_smerdzhit_1436():
         assert "залить" not in {e.main for e in g.relevant(text)}, text
 
 
+def test_ru_verbs_fire_on_reflexive_forms_1439():
+    g = glossary.load_builtin("ru")
+    cases = {"Сервис задеплоился": "задеплоить", "Всё задеплоилось": "задеплоить", "Задеплоятся вечером": "задеплоить",
+             "Релиз откатился": "откатить", "Всё откатилось": "откатить", "Ветка смержилась": "смержить",
+             "Ветка смерджилась": "смержить"}
+    for text, verb in cases.items():
+        assert verb in {e.main for e in g.relevant(text)}, text
+    for text in ("Тесто готово", "Железная дорога", "Фикус", "В зале тихо", "Это залог успеха"):
+        assert not g.relevant(text), text
+
+
 def test_ru_prod_fires_on_prodakshen_spelling_1438():
     g = glossary.load_builtin("ru")
     for text in ("Продакшен упал", "На продакшене", "Нет продакшена", "Продакшену плохо"):
