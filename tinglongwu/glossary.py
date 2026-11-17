@@ -57,6 +57,8 @@ _RU_NOUN_ENDINGS = {  # #1425: case endings per final letter of the dictionary f
 }
 
 
+_RU_PAST = {"и": ("ил", "ила", "ило", "или"), "а": ("ал", "ала", "ало", "али")}  # #1429
+
 _RU_MASC_ENDINGS = ("", "а", "у", "ом", "е", "ы", "и", "ов", "ам", "ами", "ах", "ей")
 
 
@@ -66,6 +68,9 @@ def _ru_noun_ok(word: str, src_word: str, stem: str) -> bool:
     src = _norm(src_word)
     if word == src:
         return True
+    if (src.endswith(("ить", "ать")) and len(src) >= 6 and word[:len(src) - 3] == src[:-3]
+            and word[len(src) - 3:] in _RU_PAST[src[-3]]):
+        return True  # #1429: past tense (задеплоил, задеплоили, пофиксила); other forms fall through to the prefix match
     if src.endswith("ка") and word in (src[:-2] + "ок", src[:-2] + "ек"):
         return True  # #1428: genitive plural with a fleeting vowel (прошивка -> прошивок, ветка -> веток)
     if stem == src and src[-1:] in "ая" and len(src) >= 3:
