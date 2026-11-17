@@ -1910,6 +1910,9 @@ class App:
         """#739: True when the chosen speech model is missing: its download starts now with a progress bar and this
         Start resumes by itself when it succeeds (no dialog, no second click)."""
         m = missing_start_model(run)
+        bg = getattr(self, "bg_dl", None)
+        if m is not None and bg is not None and bg.active:  # #1358: no second manifest writer while bg runs
+            return True
         if m is None or self.downloading:
             return self.downloading is not None and m is not None
         self.downloading = m
@@ -1939,6 +1942,12 @@ class App:
             need = pack_on_demand.first_missing(run.get("lang"), run.get("target"), models_dir())
         except Exception:  # noqa: BLE001  # no setup package / unreadable manifest: behave as before
             return False
+        bg = getattr(self, "bg_dl", None)
+        if need is not None and bg is not None and (bg.active or bg.errors):  # #1358: one setup child at a time
+            if not bg.active:
+                bg.errors.clear()
+                bg.start()  # Start after a failed background download is the retry
+            return True  # an installed configuration (need is None) is never blocked by the background download
         if need is None or self.downloading:
             return self.downloading is not None and need is not None
         pack, mb = need
@@ -2369,6 +2378,25 @@ class App:
             print(f"tlwu: {type(e).__name__}: {e}", file=sys.stderr, flush=True)  # raw text for the log
             q.put(("error", gui_error_text(e)))  # #885: localized, no CLI flags
 
+    def _bg_defaults_start(self):
+        """#1358: one `--default-listen` child per missing default model per run; progress comes back through the queue."""
+        from ..models import models_dir
+        from . import bg_download
+        from .core import default_listen_cmd
+
+        try:
+            mdir = models_dir()
+            if self.downloading:  # a foreground setup child is running: do not start a second manifest writer
+                self.root.after(5000, self._bg_defaults_start)
+                return
+            if not hasattr(self, "bg_dl"):
+                self.bg_dl = bg_download.BackgroundDownloads(
+                    default_listen_cmd(mdir), lambda x: self.q.put(("bg_dl_status", x)),
+                    lambda k: self.q.put(("bg_dl_ready", k)), mdir)
+            self.bg_dl.start()
+        except Exception as e:  # noqa: BLE001  # no setup package: the first-Start dialog still works
+            print(f"tlwu: background download not started: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+
     def poll(self):
         if self.closing:
             return
@@ -2381,7 +2409,12 @@ class App:
             while True:
                 ev = self.q.get_nowait()
                 kind = ev[0]
-                if kind == "status":
+                if kind == "bg_dl_status":  # #1358
+                    if not self.downloading and self.load_t0 is None:
+                        self._status_text(ev[1])
+                elif kind == "bg_dl_ready":  # #1358: hand-over hook of the pending translator (sibling issue)
+                    self.bg_ready = getattr(self, "bg_ready", set()) | {ev[1]}
+                elif kind == "status":
                     from ..cli import READY_STATUS  # already imported by the worker; not at GUI start (#332)
 
                     st = load_status_text(ev[1])  # #1020: in the UI language
@@ -2614,6 +2647,7 @@ class App:
     def run(self):
         self.root.after(POLL_MS, self.poll)
         self.root.after(UPDATE_CHECK_DELAY_MS, self._auto_update_check)  # #698: after the window is up
+        self.root.after(1500, self._bg_defaults_start)  # #1358: fetch missing default listen models in the background
         try:
             self.root.mainloop()
         except KeyboardInterrupt:
