@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import statistics
 import subprocess
 import sys
 import threading
@@ -125,6 +126,52 @@ def gap_context(offsets: list[float], srcs: list[str], a: float, b: float, n: in
     def fmt(r):
         return f"{r[0]:.1f}s {r[1][:60]!r}"
     return "before: " + "; ".join(fmt(r) for r in before) + " | after: " + "; ".join(fmt(r) for r in after)
+
+
+def match_latency(srcs: list[str], lat_rows: list[dict]) -> list[dict | None]:
+    """#1247: the --latency-jsonl record of each saved line (None when there is none). The live run writes one record
+    per final line in the same order as --save; when the counts differ, each line takes the next unused record with
+    the same text (only text that occurs once on both sides)."""
+    if len(lat_rows) == len(srcs) and all(r.get("text") == s for r, s in zip(lat_rows, srcs)):
+        return list(lat_rows)
+    # a text said more than once (e.g. "Yes.") cannot tell its records apart: those lines stay unmatched
+    from collections import Counter
+
+    n_src, n_lat = Counter(srcs), Counter(r.get("text") for r in lat_rows)
+    by_text = {r.get("text"): r for r in lat_rows if n_lat[r.get("text")] == 1}
+    return [by_text.get(s) if n_src[s] == 1 else None for s in srcs]
+
+
+def _secs(v) -> str:
+    return f"{v:.1f}s" if isinstance(v, (int, float)) and not isinstance(v, bool) else "?"
+
+
+def latency_context(offsets: list[float], srcs: list[str], lat: list[dict | None], a: float, b: float,
+                    n: int = 3) -> list[str]:
+    """#1247: for the saved lines around the longest gap [a, b], when each was shown (clip s), when its speech ended
+    (shown minus --latency-jsonl "total"), the cut / ASR seconds and the whole text. A line whose speech ended long
+    before it was shown means the gap is processing delay; a speech end late in the gap means no line was cut for
+    the speech before it (segmenter / ASR output)."""
+    rows = sorted(zip(offsets, srcs, lat), key=lambda r: r[0])
+    near = [r for r in rows if r[0] <= a][-n:] + [r for r in rows if r[0] >= b][:n]
+    out = []
+    for off, src, rec in near:
+        if rec is None or not isinstance(rec.get("total"), (int, float)):
+            out.append(f"shown {off:.1f}s (no latency record) {src[:120]!r}")
+            continue
+        out.append(f"shown {off:.1f}s speech end {off - rec['total']:.1f}s vad {_secs(rec.get('vad'))} "
+                   f"asr {_secs(rec.get('asr'))} {src[:120]!r}")
+    return out
+
+
+def latency_summary(lat_rows: list[dict]) -> str:
+    """#1247: one line over every live line: median / max seconds from speech end to shown, and the slowest ASR call."""
+    tot = sorted(r["total"] for r in lat_rows if isinstance(r.get("total"), (int, float)))
+    asr = [r["asr"] for r in lat_rows if isinstance(r.get("asr"), (int, float))]
+    if not tot:
+        return "no latency records"
+    return (f"{len(tot)} lines, speech end -> shown median {statistics.median(tot):.1f} s, max {tot[-1]:.1f} s; "
+            f"ASR max {f'{max(asr):.1f} s' if asr else '?'}")
 
 
 def tlwu_notes(log_lines: list[str], limit: int = 20) -> list[str]:
@@ -259,6 +306,23 @@ def read_jsonl(path) -> list[dict]:
     if not p.is_file():
         return []
     return [json.loads(x) for x in p.read_text("utf-8").splitlines() if x.strip() and '"src"' in x]
+
+
+def read_latency(path) -> list[dict]:
+    """#1247: the --latency-jsonl records (one per final line); [] when the file is missing or unreadable."""
+    try:
+        text = Path(path).read_text("utf-8", errors="replace")
+    except OSError:  # missing or unreadable: the diagnostics never cost the check its verdict
+        return []
+    out = []
+    for x in text.split("\n"):  # not splitlines(): a U+2028 inside a JSON string is not a record end
+        try:
+            r = json.loads(x)
+        except ValueError:
+            continue
+        if isinstance(r, dict):
+            out.append(r)
+    return out
 
 
 # ---------------------------------------------------------------- clips
@@ -429,12 +493,14 @@ def run_mic(clips: Path, mdir: str, out: Path) -> tuple[bool, str]:
     meta = json.loads((clips / "clips.json").read_text("utf-8"))["mic_en"]
     wav, common = clips / meta["wav"], ["--lang", "en", "--transcript-only", "--models-dir", mdir]
     fj, mj, stop = out / "mic_file.jsonl", out / "mic_live.jsonl", out / "mic.stop"
-    for f in (fj, mj, stop):
+    lj = out / "mic_latency.jsonl"  # #1247: per live line, speech end -> cut -> ASR -> shown
+    for f in (fj, mj, stop, lj):
         f.unlink(missing_ok=True)
     subprocess.run([sys.executable, "-m", "tinglongwu", "--file", str(wav), "--save", str(fj), *common], check=True,
                    stdout=subprocess.DEVNULL)
     with Child([sys.executable, str(ROOT / "scripts" / "verify_offline.py"), "--mic", "--seconds", "3600",
-                "--stop-file", str(stop), "--", "--capture-device", CABLE_OUT, "--save", str(mj), *common],
+                "--stop-file", str(stop), "--", "--capture-device", CABLE_OUT, "--save", str(mj),
+                "--latency-jsonl", str(lj), *common],
                out / "mic_live.log") as ch:
         ready = False
         try:
@@ -462,6 +528,11 @@ def run_mic(clips: Path, mdir: str, out: Path) -> tuple[bool, str]:
     if mic_rows:
         print("diagnose: around the gap: " + gap_context(offsets, [r.get("src", "") for r in mic_rows],
                                                          *gap_span(offsets, *meta["speech"])), flush=True)
+        lat_rows = read_latency(lj)
+        srcs = [r.get("src", "") for r in mic_rows]
+        print(f"diagnose: latency: {latency_summary(lat_rows)}", flush=True)
+        for ln in latency_context(offsets, srcs, match_latency(srcs, lat_rows), *gap_span(offsets, *meta["speech"])):
+            print(f"diagnose: gap line: {ln}", flush=True)
     for ln in tlwu_notes(ch.lines):
         print(f"diagnose: live {ln}", flush=True)
     (out / "mic_report.json").write_text(json.dumps(
