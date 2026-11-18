@@ -80,7 +80,8 @@ This section supersedes the "Mix enforcement" bullet in section 5 and the 7-day 
 - What it cannot decide (no type, no P, zero or several `area:*`, no `mode:*`, a missing section 15 line, a non-English title, an outside author) gets `needs-triage` and one comment with the reasons. Workers skip `needs-triage` items. The patrol (管家) finishes them each run: fix the labels or body, remove `needs-triage`, and give `status:todo` + `ok-to-work` when ready.
 - Nobody works an item on open; P0 waits for the patrol / pickers like everything else.
 
-### Ledger (S-hard, hourly)
+### Ledger (`ledger.yml` Action, hourly; #1469)
+- The `ledger` Action (`scripts/ledger.py`, hourly, `issues:write` only) owns this table and the section 13 infra line; S-hard no longer posts them.
 - Sum the `tlwu-usage: ... minutes=N` last line of PRs merged to dev in the last 48 h, grouped by the linked issue's type label. Post a new comment on the pinned `[health] pipeline check log` issue (#61; create and pin it if missing) with a table: `type | minutes | share | target | deficit` where deficit = target - share (percentage points).
 - Targets (owner 2026-11-18): line 3 of the throttle issue #574, `mix: bug 28, enhancement 50, eval 11, documentation 5, maint 6`; the owner edits it there, no rules change needed. Valid only when it names exactly these five types with whole numbers that sum to 100; missing or invalid -> use the default `bug 28, enhancement 50, eval 11, documentation 5, maint 6` and say `mix invalid, default used` in the ledger comment. QA 15 and ideas 5 are not in the mix: they run on fixed schedules (section 5) and are logged in the table for information only (their shares are over the same total).
 - QA and ideas rows use the section 5 inputs over the same 48 h window: QA = `tlwu-usage` comments on #61 created in the last 48 h; ideas = `tlwu-usage` comments on `[idea]` issues created in the last 48 h. Shares are over the total of all rows (merged PRs + QA + ideas). Pickers do not pick QA or ideas; those rows are informational. If the 48 h total is 0, post the table with share 0 and deficit = target for every row (the picker then takes bug/enhancement first, ties broken by the order of the targets list).
@@ -132,7 +133,7 @@ Owner: "聽 說 雙向是一個維度，平台是一個維度，語言是一個"
 ## 13. Infra cap: build the product, not the machine (owner 2026-11-14)
 Owner: "我衝到最後會拉不回來". Work on the pipeline itself must stay small next to work users can feel.
 - `infra` label: any issue whose result only the owner or the agents see. That covers the stats page and Sankey, ledger and throttle tooling, these rules, routine prompts, health logs and agent workflows. Release, CI and eval infrastructure that protects users (quality gates, installers, crash fixes) is NOT `infra`. The type label (section 10) stays as it is; `infra` is added on top.
-- Cap: `infra` issues may use at most 10% of `tlwu-usage` minutes over the last 7 days (same inputs as the section 10 ledger). The S-hard ledger comment on #61 adds one line, `infra: <minutes> / <total> = <share>% (cap 10%)`.
+- Cap: `infra` issues may use at most 10% of `tlwu-usage` minutes over the last 7 days (same inputs as the section 10 ledger). The `ledger` Action's comment on #61 (section 10) adds one line, `infra: <minutes> / <total> = <share>% (cap 10%)`.
 - Over the cap: pickers skip `infra` items (P0 still allowed) until the share drops below 10%. S-hard does not open new `infra` issues while over the cap.
 - User test for new issues: every new `enhancement` or `infra` issue states in its Why line which real user (or user report or Discussion link) it helps. With no answer it is opened as P3.
 - Triage (section 10 / 12) adds `infra` when it applies.
