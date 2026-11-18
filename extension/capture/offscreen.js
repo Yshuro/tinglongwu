@@ -28,10 +28,32 @@ async function start(streamId) {
   speaker.connect(ctx.destination);
   const rec = getRecognizer();
   if (rec.reset) rec.reset();
-  session = { stream, ctx, playbackPeak: 0, inputRate: ctx.sampleRate };
+  const owned = { stream, ctx, playbackPeak: 0, inputRate: ctx.sampleRate };
+  session = owned;
   speaker.port.onmessage = (e) => { if (session) session.playbackPeak = e.data.peak; };
   if (ctx.state !== "running") await ctx.resume();
-  return { ok: true, inputRate: ctx.sampleRate, contextState: ctx.state };
+  const { ms: warmupMs, moved } = await waitForRendering(ctx);
+  // a stop() or a newer start() during the wait owns the offscreen now: this start must not report success
+  if (session !== owned) return { ok: false, error: "superseded by a newer start or stop" };
+  return { ok: true, inputRate: ctx.sampleRate, contextState: ctx.state, warmupMs, warmupTimedOut: !moved };
+}
+
+// #1523: `state === "running"` is not enough. On a PulseAudio output that a fresh browser has just opened, the
+// context clock stays frozen for ~1.5-1.8 s while the device starts, and tab audio that arrives in that window is
+// dropped by the MediaStreamSource. Reply (and let the service worker show ON) once the clock moves,
+// so audio the tab plays after ON reaches the recognizer and the speakers from its first quantum. If the clock has
+// not moved after RENDER_WAIT_MS (an upper bound; observed stall 1.5-1.8 s) the start still succeeds with
+// warmupTimedOut: true: capture begins as soon as the device runs, which beats refusing capture on a slow device.
+export const RENDER_WAIT_MS = 3000;
+
+export async function waitForRendering(ctx, limitMs = RENDER_WAIT_MS) {
+  const t0 = performance.now();
+  const start = ctx.currentTime;
+  const moved = () => ctx.currentTime > start + 0.02;
+  while (!moved() && performance.now() - t0 < limitMs) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  return { ms: Math.round(performance.now() - t0), moved: moved() };
 }
 
 async function stop() {

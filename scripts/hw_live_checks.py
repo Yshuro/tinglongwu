@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import statistics
 import subprocess
 import sys
 import threading
@@ -125,6 +126,132 @@ def gap_context(offsets: list[float], srcs: list[str], a: float, b: float, n: in
     def fmt(r):
         return f"{r[0]:.1f}s {r[1][:60]!r}"
     return "before: " + "; ".join(fmt(r) for r in before) + " | after: " + "; ".join(fmt(r) for r in after)
+
+
+def match_latency(srcs: list[str], lat_rows: list[dict]) -> list[dict | None]:
+    """#1247: the --latency-jsonl record of each saved line (None when there is none). The live run writes one record
+    per final line in the same order as --save; when the counts differ, each line takes the next unused record with
+    the same text (only text that occurs once on both sides)."""
+    if len(lat_rows) == len(srcs) and all(r.get("text") == s for r, s in zip(lat_rows, srcs)):
+        return list(lat_rows)
+    # a text said more than once (e.g. "Yes.") cannot tell its records apart: those lines stay unmatched
+    from collections import Counter
+
+    n_src, n_lat = Counter(srcs), Counter(r.get("text") for r in lat_rows)
+    by_text = {r.get("text"): r for r in lat_rows if n_lat[r.get("text")] == 1}
+    return [by_text.get(s) if n_src[s] == 1 else None for s in srcs]
+
+
+def _secs(v) -> str:
+    return f"{v:.1f}s" if isinstance(v, (int, float)) and not isinstance(v, bool) else "?"
+
+
+def latency_context(offsets: list[float], srcs: list[str], lat: list[dict | None], a: float, b: float,
+                    n: int = 3) -> list[str]:
+    """#1247: for the saved lines around the longest gap [a, b], when each was shown (clip s), when its speech ended
+    (shown minus --latency-jsonl "total"), the cut / ASR seconds and the whole text. A line whose speech ended long
+    before it was shown means the gap is processing delay; a speech end late in the gap means no line was cut for
+    the speech before it (segmenter / ASR output)."""
+    rows = sorted(zip(offsets, srcs, lat), key=lambda r: r[0])
+    near = [r for r in rows if r[0] <= a][-n:] + [r for r in rows if r[0] >= b][:n]
+    out = []
+    for off, src, rec in near:
+        if rec is None or not isinstance(rec.get("total"), (int, float)):
+            out.append(f"shown {off:.1f}s (no latency record) {src[:120]!r}")
+            continue
+        out.append(f"shown {off:.1f}s speech end {off - rec['total']:.1f}s vad {_secs(rec.get('vad'))} "
+                   f"asr {_secs(rec.get('asr'))} {src[:120]!r}")
+    return out
+
+
+def latency_summary(lat_rows: list[dict]) -> str:
+    """#1247: one line over every live line: median / max seconds from speech end to shown, and the slowest ASR call."""
+    tot = sorted(r["total"] for r in lat_rows if isinstance(r.get("total"), (int, float)))
+    asr = [r["asr"] for r in lat_rows if isinstance(r.get("asr"), (int, float))]
+    if not tot:
+        return "no latency records"
+    return (f"{len(tot)} lines, speech end -> shown median {statistics.median(tot):.1f} s, max {tot[-1]:.1f} s; "
+            f"ASR max {f'{max(asr):.1f} s' if asr else '?'}")
+
+
+SLOW_ASR_S = 2.0  # #1247: run 44352160658: 46 of 47 live ASR calls <= 0.8 s, the one in the 14.5 s gap took 5.6 s
+
+
+def slow_asr_calls(log_lines: list[str], min_s: float = SLOW_ASR_S) -> list[str]:
+    """#1247: the live run's `--debug-latency` ASR calls (`asr N ms for X s of audio`) that took >= min_s, as
+    "<s> s for <x> s audio (line k of n)". One slow call on a normal-length segment points at a stall outside the
+    decode itself (GPU shared with another process, model lock), many points at the decode (loop retry, fallback)."""
+    import re
+
+    calls = [(int(m.group(1)) / 1000.0, float(m.group(2))) for ln in log_lines
+             for m in [re.search(r"\basr (\d+) ms for ([\d.]+) s of audio", ln)] if m]
+    return [f"{ms:.1f} s for {sec:.1f} s audio (call {k + 1} of {len(calls)})"
+            for k, (ms, sec) in enumerate(calls) if ms >= min_s]
+
+
+def gpu_apps() -> list[str]:
+    """#1247: processes using the NVIDIA GPU now (`nvidia-smi --query-compute-apps`), as "name used_memory"; [] when
+    there is no nvidia-smi or no process. Taken around the live run: another app on the runner's GPU slows ASR."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-compute-apps=process_name,used_memory", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=15).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return parse_gpu_apps(out)
+
+
+def parse_gpu_apps(text: str) -> list[str]:
+    """`nvidia-smi --query-compute-apps=process_name,used_memory --format=csv,noheader` -> ["name.exe 1234 MiB"]
+    (the file name only: full paths are long and hold the user name)."""
+    out = []
+    for ln in (text or "").splitlines():
+        name, _, mem = ln.rpartition(",")
+        name = name.strip().replace("\\", "/").rsplit("/", 1)[-1]
+        if name and "No running processes" not in ln:
+            out.append(f"{name} {mem.strip()}")
+    return out
+
+
+GPU_SAMPLE_S = 5.0  # #1247: how often GpuSampler polls nvidia-smi while the clip plays
+
+
+class GpuSampler:
+    """#1247: polls gpu_apps() every `every` s on a thread until stop(); `seen` holds each process name observed
+    (memory dropped, first-seen order), so a GPU app that starts and exits during play is still reported."""
+
+    def __init__(self, every: float = GPU_SAMPLE_S, probe=None):
+        self.every, self.probe, self.seen = every, probe or gpu_apps, []
+        self._stop = threading.Event()
+        self._t = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            apps = self.probe()
+            if self._stop.is_set():  # play ended while this poll ran: its result is not "during play"
+                return
+            for app in apps:
+                name = app.rsplit(" ", 2)[0] if app.endswith("MiB") else app
+                if name not in self.seen:
+                    self.seen.append(name)
+            if self._stop.wait(self.every):
+                return
+
+    def __enter__(self) -> GpuSampler:
+        self._t.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.stop()
+
+    def signal(self) -> None:
+        """Play ended: no new poll starts and an in-flight one is discarded (stop() still joins the thread)."""
+        self._stop.set()
+
+    def stop(self) -> list[str]:
+        self._stop.set()
+        if self._t.is_alive():
+            self._t.join(timeout=30)
+        return self.seen
 
 
 def tlwu_notes(log_lines: list[str], limit: int = 20) -> list[str]:
@@ -259,6 +386,23 @@ def read_jsonl(path) -> list[dict]:
     if not p.is_file():
         return []
     return [json.loads(x) for x in p.read_text("utf-8").splitlines() if x.strip() and '"src"' in x]
+
+
+def read_latency(path) -> list[dict]:
+    """#1247: the --latency-jsonl records (one per final line); [] when the file is missing or unreadable."""
+    try:
+        text = Path(path).read_text("utf-8", errors="replace")
+    except OSError:  # missing or unreadable: the diagnostics never cost the check its verdict
+        return []
+    out = []
+    for x in text.split("\n"):  # not splitlines(): a U+2028 inside a JSON string is not a record end
+        try:
+            r = json.loads(x)
+        except ValueError:
+            continue
+        if isinstance(r, dict):
+            out.append(r)
+    return out
 
 
 # ---------------------------------------------------------------- clips
@@ -429,19 +573,28 @@ def run_mic(clips: Path, mdir: str, out: Path) -> tuple[bool, str]:
     meta = json.loads((clips / "clips.json").read_text("utf-8"))["mic_en"]
     wav, common = clips / meta["wav"], ["--lang", "en", "--transcript-only", "--models-dir", mdir]
     fj, mj, stop = out / "mic_file.jsonl", out / "mic_live.jsonl", out / "mic.stop"
-    for f in (fj, mj, stop):
+    lj = out / "mic_latency.jsonl"  # #1247: per live line, speech end -> cut -> ASR -> shown
+    for f in (fj, mj, stop, lj):
         f.unlink(missing_ok=True)
     subprocess.run([sys.executable, "-m", "tinglongwu", "--file", str(wav), "--save", str(fj), *common], check=True,
                    stdout=subprocess.DEVNULL)
+    gpu_during: list[str] = []
+    gpu_seen: list[str] = []
+    gpu_before = gpu_apps()  # #1247: who else is on the GPU (the runner is the owner's desktop)
     with Child([sys.executable, str(ROOT / "scripts" / "verify_offline.py"), "--mic", "--seconds", "3600",
-                "--stop-file", str(stop), "--", "--capture-device", CABLE_OUT, "--save", str(mj), *common],
+                "--stop-file", str(stop), "--", "--capture-device", CABLE_OUT, "--save", str(mj),
+                "--latency-jsonl", str(lj), "--debug-latency", *common],
                out / "mic_live.log") as ch:
         ready = False
         try:
             ready = ch.wait_for(READY_MARK)
             if not ready:
                 return False, f"tlwu --mic did not get ready in {READY_TIMEOUT_S:.0f} s (see {out / 'mic_live.log'})"
-            t0 = played_at(play_child(wav, CABLE_IN))
+            with GpuSampler() as sampler:  # during play: an app that starts and exits mid-clip is still seen
+                t0 = played_at(play_child(wav, CABLE_IN))
+                sampler.signal()  # play is over: "seen during play" stops here
+                gpu_during = gpu_apps()  # end of play, before the sampler join and the tail wait; tlwu is one of these
+            gpu_seen = sampler.seen
             time.sleep(TAIL_S)
         finally:
             # verify_offline has no SIGTERM handler: ask it to stop (it then ends the tlwu --mic it started) before
@@ -462,6 +615,17 @@ def run_mic(clips: Path, mdir: str, out: Path) -> tuple[bool, str]:
     if mic_rows:
         print("diagnose: around the gap: " + gap_context(offsets, [r.get("src", "") for r in mic_rows],
                                                          *gap_span(offsets, *meta["speech"])), flush=True)
+        lat_rows = read_latency(lj)
+        srcs = [r.get("src", "") for r in mic_rows]
+        print(f"diagnose: latency: {latency_summary(lat_rows)}", flush=True)
+        for ln in latency_context(offsets, srcs, match_latency(srcs, lat_rows), *gap_span(offsets, *meta["speech"])):
+            print(f"diagnose: gap line: {ln}", flush=True)
+    slow = slow_asr_calls(ch.lines)
+    print(f"diagnose: slow asr calls (>= {SLOW_ASR_S:g} s): {len(slow)}" + (": " + "; ".join(slow[:8]) if slow else ""),
+          flush=True)
+    print(f"diagnose: gpu apps before: {', '.join(gpu_before) or 'none'} | seen during play (every "
+          f"{GPU_SAMPLE_S:g} s): {', '.join(gpu_seen) or 'none'} | at the end of play: "
+          f"{', '.join(gpu_during) or 'none'}", flush=True)
     for ln in tlwu_notes(ch.lines):
         print(f"diagnose: live {ln}", flush=True)
     (out / "mic_report.json").write_text(json.dumps(

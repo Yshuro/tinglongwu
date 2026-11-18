@@ -33,6 +33,7 @@ DEFAULTS = {
     "mic_device": "",  # #894: "" = the system default microphone; else one microphone name (Advanced)
     "voice": False, "voice_device": "",  # #330: speak each translated line on a separate output (off by default)
     "overlay_alpha": 0.82,  # #333: subtitle bar opacity (right-click > Opacity), kept across restarts
+    "gpu_pack_never_ask": False,  # #1525: "Don't ask again" on the GPU speed-up pack banner (gpu_offer.DISMISS_KEY)
     "tour_seen": False,  # #314: the first-launch "3 steps" overlay was closed with "Got it"
     "usage_asked": False,  # #680: the one-time "what do you mainly use it for?" question was answered or skipped
     "usage_use": "",  # #680: the answer (one of USAGE_CHOICES, "" = none); local only, never sent anywhere
@@ -251,6 +252,19 @@ def watch_settings(s: dict) -> dict:
     if s.get("source") in SOURCES:
         run["source"] = s["source"]
     return run
+
+
+def source_label_key(s: dict) -> str | None:
+    """#1544: i18n key of the plain-words source line shown next to 情境 in the video scene (None in the meeting scene,
+    whose listen leg is always the PC sound). The saved Source can be "mic" (#894), so it is never hidden in 調整."""
+    if scene_of(s) != "video":
+        return None
+    return "gui_src_mic" if s.get("source") == "mic" else "gui_src_system"
+
+
+def toggled_source(s: dict) -> str:
+    """#1544: the Source the one-click toggle switches to (system sound <-> microphone). `s` is not changed."""
+    return "system" if s.get("source") == "mic" else "mic"
 
 
 def scene_runs(s: dict) -> tuple[str, dict, dict | None]:
@@ -587,15 +601,43 @@ def mt_path_text(path: tuple[str, int] | None) -> str:
     return t("gui_mt_path_gpu", api={"vulkan": "Vulkan", "cuda": "CUDA"}.get(backend, backend))
 
 
+_NVIDIA_SEEN: list[bool] = []  # cache: nvidia-smi runs at most once per process
+
+
+def nvidia_seen(gpu_info=None, block: bool = True) -> bool:
+    """#1525: nvidia-smi reports an NVIDIA GPU (cached). CPU mode on such a machine must not say "no NVIDIA GPU".
+    block=False (Tk thread): never runs nvidia-smi; an unknown result reads as False (the GUI probes at start-up)."""
+    if gpu_info is not None:
+        return gpu_info()[0] is not None
+    if not _NVIDIA_SEEN and not block:
+        return False
+    if not _NVIDIA_SEEN:
+        from ..hwprobe import gpu_info as probe
+
+        try:
+            _NVIDIA_SEEN.append(probe()[0] is not None)
+        except Exception:  # noqa: BLE001 - no probe = say nothing about the GPU
+            _NVIDIA_SEEN.append(False)
+    return _NVIDIA_SEEN[0]
+
+
+def cpu_mode_text(gpu_seen: bool | None = None, block: bool = True) -> str:
+    """The "CPU mode" text: "no NVIDIA GPU" only when nvidia-smi found none, else "NVIDIA GPU found but not used"."""
+    from ..i18n import t
+
+    return t("gui_cpu_mode_gpu_unused" if (nvidia_seen(block=block) if gpu_seen is None else gpu_seen)
+             else "gui_cpu_mode")
+
+
 def cpu_mode_line(device: str, mt_ms: float | None = None, lang: str | None = None,
-                  path: tuple[str, int] | None = None) -> str | None:
+                  path: tuple[str, int] | None = None, block: bool = True) -> str | None:
     """#780: status text "CPU mode" (+ per-line MT ms) when running on the CPU, else None.
     path (#1198): (backend, threads) of the MT model, shown after the ms so the user sees CPU vs Vulkan."""
     from ..i18n import t
 
     if device != "cpu":
         return None
-    base = t("gui_cpu_mode")
+    base = cpu_mode_text(block=block)
     if mt_ms is None:
         return base
     where = mt_path_text(path)
@@ -607,12 +649,12 @@ def drop_cpu_mode_notice(notice: str, status: str) -> str:
     remove it from the orange notice (a whole line, or a " | ..." tail); other notice text stays."""
     from ..i18n import t
 
-    cpu = t("gui_cpu_mode")
-    if not notice or cpu not in (status or ""):
+    cpus = {t("gui_cpu_mode"), t("gui_cpu_mode_gpu_unused")}  # #1525: either wording
+    if not notice or not any(c in (status or "") for c in cpus):
         return notice
     keep = []
     for ln in notice.split(chr(10)):
-        parts = [p for p in ln.split(" | ") if p.strip() != cpu]
+        parts = [p for p in ln.split(" | ") if p.strip() not in cpus]
         if parts:
             keep.append(" | ".join(parts))
     return chr(10).join(keep).strip()
@@ -914,6 +956,7 @@ def run_pack_download(pack: str, put, mdir=None, popen=None, bundled: bool | Non
     import subprocess
 
     popen = popen or subprocess.Popen
+    p = None
     try:
         p = popen(cmd or pack_download_cmd(pack, mdir, bundled), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                   env=download_env(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -928,6 +971,11 @@ def run_pack_download(pack: str, put, mdir=None, popen=None, bundled: bool | Non
     except Exception as e:  # noqa: BLE001
         put(("pack_line", f"{type(e).__name__}: {e}"[:90]))
         rc = -1
+        if p is not None:  # #1525: never return while the child may still write (callers release their lock here);
+            try:  # let it finish rather than kill it mid-swap (a kill between the two renames loses the old pack)
+                p.wait()
+            except Exception:  # noqa: BLE001
+                _diag.swallowed(__name__)
     put(("pack_done", pack, rc))
     return rc
 
@@ -1094,6 +1142,7 @@ class QueueSink(Sink):
         from ..reverse.echoguard import shared
 
         if shared().check(r.original, r.target if r.src != r.tgt else ""):  # #1070: our own voice coming back
+            self.q.put(("drop", r.original))  # #1532: its pending row (if shown) goes away instead of waiting forever
             return
         ev = ("final", r.original, r.target if r.src != r.tgt and r.target else r.original)
         if r.replaces is not None:  # #1395: the previous line + a late fragment, shown in that line's place
@@ -1183,7 +1232,7 @@ def strip_silent_hint(text: str) -> str:
     notice lines stay. Called when listen-side audio or an other-side bubble arrives."""
     from ..i18n import MESSAGES
 
-    heads = {m["listen_silent"].split("{names}")[0] for m in MESSAGES.values() if "listen_silent" in m}
+    heads = {m[k].split("{names}")[0] for m in MESSAGES.values() for k in ("listen_silent", "listen_silent_mic") if k in m}
     keep = [ln for ln in (text or "").split(chr(10)) if not any(ln.startswith(h) for h in heads)]
     return chr(10).join(keep).strip()
 
@@ -1201,16 +1250,28 @@ def speaker_text(book, label, fmt):
     return shown
 
 
+PENDING_MARK = " …"  # #1532: a heard line whose translation is still running: dim source text + this mark
+
+
 class SubtitleState:
-    """What the overlay shows: last `max_lines` lines; a draft is replaced in place by the final."""
+    """What the overlay shows: last `max_lines` lines; a draft is replaced in place by the final.
+
+    #1532: a "source" event (ASR has the text, MT still running) adds the line at once, in its place, as a pending
+    row (dim source + PENDING_MARK); its "final" fills that same row in place, so no other line moves and a
+    translation that comes back out of order still lands on its own line."""
 
     def __init__(self, max_lines: int = 2):
         self.max_lines = max_lines
-        self.finals: list[tuple[str, str]] = []  # (src, target), oldest first
+        # (src, target), oldest first; target None = pending (#1532: shown as dim source until its final arrives)
+        self.finals: list[tuple[str, str | None]] = []
         self.draft: tuple[str, str] | None = None
         self.whos: list[str | None] = []  # 0.3.8: speaker token of each final (aligned with finals; None = none)
-        self.pending: list[str] = []  # #53: sources heard, translation still running (newest one is the draft)
         self.paused = False  # frozen display: events still update the state (nothing is lost) but nothing is redrawn
+
+    @property
+    def pending(self) -> list[str]:
+        """#53/#1532: sources heard whose translation is still running, oldest first."""
+        return [src for src, tgt in self.finals if tgt is None]
 
     def apply(self, ev: tuple) -> bool:
         """Apply an event; True if the display should be redrawn."""
@@ -1218,31 +1279,41 @@ class SubtitleState:
             return not self.paused
         return False
 
+    def _append(self, src: str, tgt: str | None, who: str | None) -> None:
+        self.finals.append((src, tgt))
+        self.whos.append(who)
+        del self.finals[:-self.max_lines], self.whos[:-self.max_lines]
+
     def _apply(self, ev: tuple) -> bool:
         kind = ev[0]
         if kind == "draft":
             self.draft = (ev[1], ev[2])
         elif kind == "source":
-            self.pending.append(ev[1])
-            self.draft = ("", ev[1])  # same shape as a source-only live draft: the source text, dim
+            self._append(ev[1], None, None)
         elif kind == "final":
-            if self.pending and self.pending[0] == ev[1]:
-                self.pending.pop(0)
-            self.draft = ("", self.pending[-1]) if self.pending else None
-            self.finals.append((ev[1], ev[2]))
-            self.whos.append(ev[3] if len(ev) > 3 else None)
-            del self.finals[:-self.max_lines], self.whos[:-self.max_lines]
+            self.draft = None  # a live draft is replaced by its final
+            who = ev[3] if len(ev) > 3 else None
+            i = next((k for k, (src, tgt) in enumerate(self.finals) if tgt is None and src == ev[1]), None)
+            if i is None:  # never announced (or scrolled out): an ordinary new line
+                self._append(ev[1], ev[2], who)
+            else:  # #1532: the pending row becomes the final in place
+                self.finals[i] = (ev[1], ev[2])
+                self.whos[i] = who
         elif kind == "amend":  # #1395 ("amend", replaced src, src, target[, speaker]): newest final with that src
-            i = next((k for k in range(len(self.finals) - 1, -1, -1) if self.finals[k][0] == ev[1]), None)
+            i = next((k for k in range(len(self.finals) - 1, -1, -1)
+                      if self.finals[k][0] == ev[1] and self.finals[k][1] is not None), None)
             if i is None:  # scrolled out (or never shown): an ordinary final line
                 return self._apply(("final",) + ev[2:])
             self.finals[i] = (ev[2], ev[3])
             if len(ev) > 4:
                 self.whos[i] = ev[4]
+        elif kind == "drop":  # #1532: a heard line that will get no final (echo of our own voice): remove its row
+            i = next((k for k, (src, tgt) in enumerate(self.finals) if tgt is None and src == ev[1]), None)
+            if i is None:
+                return False
+            del self.finals[i], self.whos[i]
         elif kind == "final_side":  # #1001: a speak-leg line next to a listen session: the draft row stays
-            self.finals.append((ev[1], ev[2]))
-            self.whos.append(None)
-            del self.finals[:-self.max_lines], self.whos[:-self.max_lines]
+            self._append(ev[1], ev[2], None)
         elif kind == "clear":
             if self.draft is None:
                 return False
@@ -1252,8 +1323,8 @@ class SubtitleState:
         return True
 
     def lines(self) -> list[tuple[str, bool]]:
-        """[(target_text, is_draft)] oldest first, at most max_lines."""
-        rows = [(t, False) for _, t in self.finals]
+        """[(target_text, is_draft)] oldest first, at most max_lines; a pending row is (source + mark, True)."""
+        rows = [(src + PENDING_MARK, True) if tgt is None else (tgt, False) for src, tgt in self.finals]
         if self.draft:
             rows.append((self.draft[1], True))
         return rows[-self.max_lines:]
@@ -1269,8 +1340,9 @@ class SubtitleState:
         return self.finals[-1][0] if self.finals else ""
 
     def history(self) -> list[tuple[str, str, bool]]:
-        """[(src, target_text, is_draft)] for the scroll-back: every kept final, then the draft (if any)."""
-        rows = [(src, t, False) for src, t in self.finals]
+        """[(src, target_text, is_draft)] for the scroll-back: every kept line, then the draft (if any).
+        A pending row (#1532) is ("", source + mark, True): its text is the source, so no second source line."""
+        rows = [("", src + PENDING_MARK, True) if tgt is None else (src, tgt, False) for src, tgt in self.finals]
         if self.draft:
             rows.append((self.draft[0], self.draft[1], True))
         return rows

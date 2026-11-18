@@ -19,7 +19,7 @@ from .icon import apply_icon, icon_path, set_app_id
 from ..langs import from_label as lang_from_label, label as lang_label, labels as lang_labels
 from ..i18n import SILENT_CLEAR
 from .core import scene_of as scene_mode_name
-from .core import (SpeakerColors, SPK_AVATAR_FG, speaker_initial, speaker_text, SCENES, WATCH_MODE, scene_mode, scene_runs, strip_silent_hint, GUI_SEND_MODES, BOTH_MODE, SPEAK_MARK, SpeakQueueSink, start_button, cpu_ram_gb, choice_label, choice_labels, choice_value, SPEAK_HINT_CABLE, meeting_cable, quick_settings, SameLanguageError, SEND_MODES, send_mode_notice_key, restart_needed, send_gate_line, speak_route, speak_start_view, tour_on_start, USAGE_CHOICES, usage_answer, usage_should_ask, tour_text, ALPHA_STEP, FONT_MAX, FONT_MIN, ROWS_MAX, ROWS_MIN, HISTORY_LINES, PRESETS, QUALITIES, SOURCES, TARGETS, QueueDraftRenderer,
+from .core import (SpeakerColors, SPK_AVATAR_FG, speaker_initial, speaker_text, SCENES, WATCH_MODE, scene_mode, scene_runs, source_label_key, toggled_source, strip_silent_hint, GUI_SEND_MODES, BOTH_MODE, SPEAK_MARK, SpeakQueueSink, start_button, cpu_ram_gb, choice_label, choice_labels, choice_value, SPEAK_HINT_CABLE, meeting_cable, quick_settings, SameLanguageError, SEND_MODES, send_mode_notice_key, restart_needed, send_gate_line, speak_route, speak_start_view, tour_on_start, USAGE_CHOICES, usage_answer, usage_should_ask, tour_text, ALPHA_STEP, FONT_MAX, FONT_MIN, ROWS_MAX, ROWS_MIN, HISTORY_LINES, PRESETS, QUALITIES, SOURCES, TARGETS, QueueDraftRenderer,
                    QueueSink, SubtitleState, engine_from_label, engine_labels, clamp_font, clamp_rows, follow_newest, load_settings,
                    combo_width, doctor_lang, is_downloaded, label_for_model, model_from_label, model_labels, rows_after_drag, run_download, run_setup_check, missing_start_model, StartDownload, quality_hint, quality_speech_model,
                    save_settings, settings_to_argv, topics_on, topics_model_path, voice_outputs, listen_outputs, mic_inputs, clamp_alpha, run_pack_download, gui_error_text, load_status_text)
@@ -33,6 +33,14 @@ except ImportError:  # pragma: no cover
 
 POLL_MS = 50
 UPDATE_CHECK_DELAY_MS = 5000
+def _mtime(p):
+    """#1525: identity of the installed GPU pack folder (a replacement gets a new mtime); None when absent."""
+    try:
+        return p.stat().st_mtime_ns if p is not None else None
+    except OSError:
+        return None
+
+
 UPDATE_LINE_WRAP_PX = 200  # #455: text + two buttons stay inside the 420 px main window
 # #886: Advanced settings sit in two label + control columns (grid columns 0-2 and 4-6, 3 is a gap), so the panel
 # with Advanced open fits a 1366x768 screen; long labels wrap instead of widening the panel
@@ -433,6 +441,7 @@ class App:
         self._build_quick()
         self._build_bar()
         self._build_update_line()
+        self._build_gpu_offer()  # #1525: one-click GPU speed-up pack offer (NVIDIA only)
         self.build_menubar()
         self.overlay = Overlay(self.root, self)
         self._sync_bar()  # #1042: the bar is not on screen before Start
@@ -592,6 +601,7 @@ class App:
         if getattr(self, "scene_combo", None) is not None:  # the dropdown shows names in the new UI language
             self.scene_combo.configure(values=self._scene_labels())
             self.scene_combo.set(t("gui_scene_" + self.v_scene.get()))
+            self._source_sync()  # #1544
         self.combos["lang"].configure(values=lang_labels())
         self._relabel_combos()
         self.home_lang.configure(values=lang_labels())
@@ -926,6 +936,10 @@ class App:
         self.scene_combo.set(t("gui_scene_" + self.v_scene.get()))
         self.scene_combo.pack(side="left")
         self.scene_combo.bind("<<ComboboxSelected>>", lambda _e: self._scene_changed())
+        # #1544: what the video scene listens to, in plain words, one click to switch (was only under 調整)
+        self.source_row = ttk.Frame(b)  # its own row: next to the scene dropdown it pushed the bar past its max width
+        self.btn_source = ttk.Button(self.source_row, command=self._source_toggled)
+        self.btn_source.pack(side="left")
         self.toggle_row = row1 = ttk.Frame(b)
         self.v_mic = tk.BooleanVar(value=True)
         self.btn_mic = ttk.Checkbutton(row1, variable=self.v_mic, style="Toolbutton", command=self._mic_toggled)
@@ -965,15 +979,43 @@ class App:
         if wide:
             self.scene_row.grid(row=0, column=0, columnspan=1, sticky="w", pady=0, padx=(0, 24))
             self.toggle_row.grid(row=0, column=1, columnspan=1, sticky="w", pady=0)
-            self.action_row.grid(row=1, column=0, columnspan=2, sticky="we", pady=(8, 0))
+            self.source_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            self.action_row.grid(row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
         else:
             self.scene_row.grid(row=0, column=0, columnspan=2, sticky="we", pady=(0, 6), padx=0)
             self.toggle_row.grid(row=1, column=0, columnspan=2, sticky="we", pady=0)
-            self.action_row.grid(row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
+            self.source_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            self.action_row.grid(row=3, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        self._source_sync()  # #1544: the grid() above would show the row again in the meeting scene
 
     @staticmethod
     def _scene_labels():
         return [t("gui_scene_" + sc) for sc in SCENES]
+
+    def _live_source_settings(self) -> dict:
+        """#1544: the settings with the Source as the Advanced box currently shows it (v_source is the live value;
+        collect() copies it back into settings at Start, so the button and the box must read / write the same one)."""
+        v = getattr(self, "v_source", None)
+        return dict(self.settings, source=v.get()) if v is not None else self.settings
+
+    def _source_sync(self):
+        """#1544: show / hide the source toggle for the saved scene and refresh its words."""
+        key = source_label_key(self._live_source_settings())
+        if key is None:
+            self.source_row.grid_remove()
+            return
+        self.btn_source.configure(text=t(key))
+        if self.source_row.grid_info() == {} and self.bar_wide is not None:
+            self.source_row.grid()
+
+    def _source_toggled(self):
+        """#1544: one click switches PC sound <-> microphone (applies at the next Start)."""
+        new = toggled_source(self._live_source_settings())
+        self.settings["source"] = new
+        if getattr(self, "v_source", None) is not None:
+            self.v_source.set(new)  # the Advanced box follows; Start reads this value (collect)
+        save_settings(self.settings)
+        self._source_sync()
 
     def _scene_changed(self):
         """0.3.8: remember the scene picked in the dropdown (applies at the next Start; disabled while running)."""
@@ -983,6 +1025,7 @@ class App:
         self.v_scene.set(SCENES[idx])
         self.settings["scene"] = SCENES[idx]
         save_settings(self.settings)
+        self._source_sync()
 
     def _spk_toggled(self):
         """0.3.8: 標示說話者. On + pack missing -> ask, download in a worker thread (Tk never blocks); the labels start
@@ -1258,6 +1301,7 @@ class App:
         self.v_quality.trace_add("write", lambda *_: self._quality_changed())
         self._quality_changed()
         self.v_source = self._combo(4, "gui_source", "source", SOURCES, "source")
+        self.v_source.trace_add("write", lambda *_: self._source_sync())  # #1544: the video button follows the box
         self._build_send_mode(g_mine).pack(anchor="w", fill="x")
         self.v_preset = self._combo(5, "gui_mode", "preset", PRESETS, "preset")
         self._label(6, "gui_glossary")
@@ -1343,6 +1387,117 @@ class App:
         self.upd_yes = ttk.Button(u, command=self._update_yes, style="Bar.TButton", width=0)
         self.upd_apply_when_ready = False
 
+    # -- #1525: GPU speed-up pack offer ---------------------------------------------------------------
+    def _build_gpu_offer(self):
+        """One non-blocking line: "NVIDIA GPU found - install speed-up pack? [Install] [Not now] [Don't ask again]".
+        Hidden unless gpu_offer.should_offer; nvidia-smi runs on a thread, never on the Tk thread."""
+        from . import gpu_offer
+
+        self.gpu_busy = False
+        self.gpu_lines: list[str] = []
+        g = self.gpu_frame = ttk.Frame(self.root, padding=(4, 0, 4, 2))
+        self.v_gpu = tk.StringVar()
+        ttk.Label(g, textvariable=self.v_gpu, wraplength=UPDATE_LINE_WRAP_PX).pack(side="left")
+        self.gpu_bar = ttk.Progressbar(g, mode="indeterminate", length=80)
+        self.gpu_btns = [self._tx(ttk.Button(g, command=c, style="Bar.TButton", width=0), k) for k, c in
+                         (("gpu_offer_never", self._gpu_never), ("gpu_offer_later", self._gpu_hide),
+                          ("gpu_offer_install", self._gpu_install))]
+        probe = not gpu_offer.offline() and not gpu_offer.cpu_mode()
+
+        def work():  # nvidia-smi once, off the Tk thread; also fills the CPU-mode wording cache (core.nvidia_seen)
+            from .core import nvidia_seen
+
+            nvidia_seen()
+            if probe:
+                self.q.put(("gpu_state", self._gpu_detect()))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _gpu_detect() -> str:
+        from . import gpu_offer
+
+        try:
+            return gpu_offer.detect()
+        except Exception:  # noqa: BLE001 - no probe: no banner
+            return gpu_offer.UNAVAILABLE
+
+    def _gpu_show(self, text: str, buttons: bool, busy: bool = False):
+        self.v_gpu.set(text)
+        for b in self.gpu_btns:
+            b.pack_forget()
+        if buttons:
+            for b in self.gpu_btns:
+                b.pack(side="right", padx=(4, 0))
+        if busy:
+            self.gpu_bar.pack(side="right", padx=(4, 0))
+            self.gpu_bar.start(15)
+        else:
+            self.gpu_bar.stop()
+            self.gpu_bar.pack_forget()
+        if not self.gpu_frame.winfo_ismapped():
+            self.gpu_frame.pack(fill="x")
+
+    def _gpu_hide(self):
+        self.gpu_bar.stop()
+        self.gpu_frame.pack_forget()
+
+    def _gpu_offer_show(self):
+        from . import gpu_offer
+
+        self._gpu_show(t("gpu_offer_banner", size=gpu_offer.GPU_PACK_SIZE), buttons=True)
+
+    def _gpu_never(self):
+        from . import gpu_offer
+
+        self.settings[gpu_offer.DISMISS_KEY] = True
+        save_settings(self.settings)
+        self._gpu_hide()
+
+    def _gpu_install(self):
+        from . import gpu_offer
+        from .core import run_pack_download
+
+        if self.gpu_busy or gpu_offer.INSTALLING.is_set() or gpu_offer.offline():
+            return
+        from ..gpu_pack import pack_dir
+
+        pack = pack_dir()
+        failed_at = getattr(self, "gpu_runtime_failed_mtime", None)  # pack replaced since the failure -> trust it
+        if (pack is not None and (not getattr(self, "gpu_runtime_failed", False) or failed_at != _mtime(pack))
+                and gpu_offer._pack_usable(pack)):  # installed meanwhile (e.g. Add-ons); not after a CUDA load failure
+            self._gpu_show(t("gpu_offer_ok"), buttons=False)
+            return
+        gpu_offer.INSTALLING.set()
+        self.gpu_busy, self.gpu_lines = True, []
+        self._gpu_show(t("gpu_offer_running", size=gpu_offer.GPU_PACK_SIZE), buttons=False, busy=True)
+        put = lambda ev: self.q.put(("gpu_" + ev[0], *ev[1:]))  # noqa: E731 - not the language-pack events
+        try:
+            threading.Thread(target=gpu_offer.run_install, args=(run_pack_download, put),
+                             kwargs={"cmd": gpu_offer.gpu_pack_cmd()}, daemon=True).start()
+        except RuntimeError:  # no thread: release the lock and offer Install again
+            gpu_offer.INSTALLING.clear()
+            self.gpu_busy = False
+            self._gpu_offer_show()
+
+    def _gpu_event(self, ev):
+        from . import gpu_offer
+
+        kind = ev[0]
+        if kind == "gpu_state":
+            if not self.gpu_busy and gpu_offer.should_offer(ev[1], gpu_offer.cpu_mode(), bool(self.settings.get(gpu_offer.DISMISS_KEY)),
+                                      gpu_offer.offline()):
+                self._gpu_offer_show()
+        elif kind == "gpu_pack_line":
+            self.gpu_lines = [*self.gpu_lines[-20:], ev[1]]
+        elif kind == "gpu_pack_done":
+            self.gpu_busy = False
+            if gpu_offer.install_ok(ev[2], self.gpu_lines):
+                self.gpu_runtime_failed = False  # a fresh pack replaced the one that failed to load
+                self._gpu_show(t("gpu_offer_ok"), buttons=False)
+            else:
+                self._gpu_show(t("gpu_offer_fail", reason=gpu_offer.fail_reason(self.gpu_lines)), buttons=False)
+
     def _upd_show(self, key: str, buttons: tuple[str, str] | None = None, **kw):
         self.upd_msg = (key, kw, buttons)
         self.v_upd.set(t(key, **kw))
@@ -1411,7 +1566,12 @@ class App:
             self._upd_show("gui_upd_available", ("gui_upd_now", "gui_upd_later"), ver=ver)
 
     def _update_yes(self):
-        if self.upd_exe:
+        if self.upd_msg and self.upd_msg[0] == "gui_upd_fail_check":
+            import webbrowser
+
+            webbrowser.open(autoupdate.DOWNLOAD_URL)
+            self._update_later()
+        elif self.upd_exe:
             self._apply_update()
         elif self.upd_ver and not self.upd_busy:
             self._download_update(silent=False)
@@ -1432,6 +1592,10 @@ class App:
             self.upd_busy = False
             if ev[1]:
                 self._status_text(t("gui_upd_none", ver=__version__))
+        elif kind == "upd_fail_check":  # #1526: a failed manual check must not read as "latest"
+            self.upd_busy = False
+            self.upd_ver = None
+            self._upd_show("gui_upd_fail_check", ("gui_upd_open_page", "gui_upd_later"), why=ev[1])
         elif kind == "upd_progress":
             if self.upd_msg and self.upd_msg[0] == "gui_upd_downloading":
                 self._upd_show("gui_upd_downloading", ver=self.upd_ver, pct=ev[1])
@@ -1638,6 +1802,10 @@ class App:
         cb = getattr(self, "scene_combo", None)
         if cb is not None:
             cb.configure(state="readonly" if st == "normal" else "disabled")
+        bs = getattr(self, "btn_source", None)
+        if bs is not None:  # #1544: the source applies at the next Start too; follows a change made under 調整
+            self._source_sync()
+            bs.configure(state=st)
 
     def _sync_quick(self):
         """Label/enable the first-screen buttons for the current session state (#294)."""
@@ -2577,7 +2745,7 @@ class App:
                     from .core import cpu_mode_line
 
                     if self.load_t0 is None and not self.errored:
-                        text = cpu_mode_line("cpu", ev[1], path=ev[2] if len(ev) > 2 else None) or ""
+                        text = cpu_mode_line("cpu", ev[1], path=ev[2] if len(ev) > 2 else None, block=False) or ""
                         wait = self._wait_line()  # #1253: a held-translation / backlog note stays visible
                         if wait and text and getattr(self, "_pre_backlog", None) is not None:
                             self._pre_backlog = text  # shown again (alone) once nothing waits any more
@@ -2586,6 +2754,16 @@ class App:
                 elif kind == "notice" and ev[1] == SILENT_CLEAR:  # listened sound is back
                     self.v_notice.set(strip_silent_hint(self.v_notice.get()))
                 elif kind == "notice":
+                    from . import gpu_offer
+
+                    if gpu_offer.is_missing_pack_notice(ev[1]):
+                        self.gpu_runtime_failed = True  # the runtime could not load CUDA: Install must really repair
+                        from ..gpu_pack import pack_dir
+
+                        self.gpu_runtime_failed_mtime = _mtime(pack_dir())
+                    if (gpu_offer.is_missing_pack_notice(ev[1]) and not gpu_offer.offline() and not self.gpu_busy
+                            and not self.settings.get(gpu_offer.DISMISS_KEY)):
+                        self._gpu_offer_show()  # #1525: the "GPU pack missing" line gets its [Install] button
                     if ev[1] not in self.v_notice.get():  # the repeated silent hint must not clobber other lines
                         self.v_notice.set(ev[1])
                         self._dedupe_notice()  # #1241
@@ -2593,6 +2771,8 @@ class App:
                         self._show_panel()
                 elif kind == "topics":  # #611
                     self.render_topics(show=bool(self.topic_panel.entries()))
+                elif kind.startswith("gpu_"):  # #1525
+                    self._gpu_event(ev)
                 elif kind == "pack_line":
                     self._dl_event(ev)
                     self._status_text(ev[1])

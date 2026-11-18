@@ -620,9 +620,9 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
         # gui_cpu_mode text is not appended again (the status line carries it with the per-line MT ms)
         notice(" ".join(t("gpu_fallback", why=why).split()))
     elif notice is not None and dev == "cpu":
-        from .i18n import t
+        from .gui.core import cpu_mode_text
 
-        notice(t("gui_cpu_mode"))  # #780: --device cpu / no GPU asked for: still say CPU mode
+        notice(cpu_mode_text())  # #780: --device cpu / no GPU asked for: still say CPU mode (#1525: GPU-aware wording)
     glossary = None
     if a.glossary:
         from .glossary import load as load_glossary
@@ -726,10 +726,12 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
     if stop is not None and stop.is_set():
         return
     source = select_backend(a.file, a.mic, a.device)
-    if notice is not None and hasattr(source, "on_silent"):  # #1070: ~10 s of no sound: say what is listened to
+    if notice is not None and hasattr(source, "on_silent") and getattr(a, "mic_mute", None) is None:
+        # #1070: ~10 s of no sound: say what is listened to. #1544: not on the GUI speak leg (it shares the notice line)
         from .i18n import t as _t_silent
 
-        source.on_silent = lambda names: notice(_t_silent("listen_silent", names=" / ".join(names) or "?"))
+        _silent_key = getattr(source, "silent_key", "listen_silent")  # #1544: the mic has its own wording
+        source.on_silent = lambda names: notice(_t_silent(_silent_key, names=" / ".join(names) or "?"))
         if hasattr(source, "on_sound"):  # the hint must not outlive the silence (0.3.8)
             from .i18n import SILENT_CLEAR
 

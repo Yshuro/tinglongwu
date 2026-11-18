@@ -9,7 +9,9 @@ name: audio-routing
 on:
   push:
     branches: [dev]
+  # #1547: PRs into dev start no Windows/macOS runner job (only `ci` test gates dev, section 17); dev push, release snapshot dispatch and manual runs cover it
   pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       play_device:
@@ -33,6 +35,9 @@ env:
 
 jobs:
   audio-routing:
+    # #1540: no duplicate run on the release PR (release/vX.Y.Z -> main); the snapshot commit already has its
+    # dev push / release-pr.yml dispatch run, which is what the release gate reads
+    if: ${{ !startsWith(github.head_ref, 'release/') }}
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
