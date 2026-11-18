@@ -56,9 +56,58 @@ MT_HOLD_MAX = 2.0
 # on_catchup(lines) reports the lines left untranslated; the status line says so in plain words.
 ASR_JOIN_S = 3.0
 ASR_JOIN_MAX_S = 28.0
+# #1247 / #894: one joined call is one stretch with no new subtitle (every line of it comes out when the call ends).
+# hw-tests run 44248844590 (dev bd2fd71, live mic on the CPU runner, ASR ~50 s behind): the 28 s joins while it caught
+# up left 11.6 s without a subtitle against #894's 10 s limit. A join is now only as long as the recent calls predict
+# fits in ASR_JOIN_CALL_S of ASR time (join_cap(), from the last ASR_COST_N calls), which
+# leaves 4 s of the 10 s for the segment cut and writing. ASR_JOIN_MAX_S stays the upper bound.
+ASR_JOIN_CALL_S = 6.0
+ASR_COST_N = 8
+ASR_JOIN_HARD_S = 9.0  # #1247: never plan a call longer than this (#894's 10 s gap minus ~1 s to cut and write)
+ASR_JOIN_DRAIN = 1.5   # #1247: a slow CPU joins 1.5 x the break-even length (cost = audio) so the backlog shrinks
 MT_STALE_S = 5.0
 MT_HOLD_POLL = 0.05
 DUP_WINDOW = 10.0  # seconds: an identical final line this soon after the same one is dropped (Whisper repeats on silence)
+
+
+def join_cap(history) -> float:
+    """#1247: seconds of audio one catch-up join may hold. history: recent (audio seconds decoded, ASR seconds) of
+    live calls, oldest first. Cost is modelled as fixed + rate * seconds (Whisper pads every call to a 30 s window).
+    - fit: least squares over the recent calls (without calls over 2 x ASR_JOIN_CALL_S when the rest span >= 1 s: a
+      CPU spike would bend the line); used when the calls span >= 1 s and the rate is positive. The cap is the join
+      whose predicted cost is the target: ASR_JOIN_CALL_S, raised when a join of that cost cannot drain the backlog
+      (cost >= audio) to the cost of ASR_JOIN_DRAIN x the break-even length, never above ASR_JOIN_HARD_S. When even
+      ASR_JOIN_HARD_S cannot drain it the subtitle gap wins (#894) and the backlog grows.
+    - newest call slower than the fit predicts (x1.2), or no fit: with cost affine and fixed >= 0, a join k times the
+      newest call costs at most k times its cost, so the cap is the newest length x ASR_JOIN_HARD_S / its cost (below
+      one segment when the newest call alone took longer: the caller then keeps one segment).
+    No history: ASR_JOIN_MAX_S (#1369). Never above ASR_JOIN_MAX_S."""
+    pts = [(a, c) for a, c in history if a > 0 and c >= 0]
+    if not pts:
+        return ASR_JOIN_MAX_S
+    a_new, c_new = pts[-1]
+    newest = ASR_JOIN_MAX_S if c_new <= 0 else a_new * ASR_JOIN_HARD_S / c_new
+    calm = [(a, c) for a, c in pts if c <= 2 * ASR_JOIN_CALL_S]
+    fpts = calm if len(calm) > 1 and max(a for a, _ in calm) - min(a for a, _ in calm) >= 1.0 else pts
+    fit = None
+    if max(a for a, _ in fpts) - min(a for a, _ in fpts) >= 1.0:
+        rate, fixed = np.polyfit([a for a, _ in fpts], [c for _, c in fpts], 1)
+        if rate > 0:
+            fit = (max(0.0, float(fixed)), float(rate))
+    if fit is None:
+        cap = newest
+    else:
+        fixed, rate = fit
+        target = ASR_JOIN_CALL_S
+        if rate < 1.0:
+            drain = fixed + rate * ASR_JOIN_DRAIN * fixed / (1.0 - rate)  # cost of a join that clearly drains
+            target = min(ASR_JOIN_HARD_S, max(target, drain))
+        else:
+            target = ASR_JOIN_HARD_S  # no join size drains: keep the gap bounded
+        cap = (target - fixed) / rate
+        if c_new > 1.2 * (fixed + rate * a_new):  # slowed down since the fit: trust the newest call
+            cap = min(cap, newest)
+    return float(min(ASR_JOIN_MAX_S, max(0.0, cap)))
 
 
 def _dup_key(text: str) -> str:
@@ -221,6 +270,7 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
     last_ep = [None]  # epoch of the newest segment handed to ASR (for --debug-latency)
     last_asr = [0.0]  # seconds the newest segment spent in ASR
     last_len = [0.0]  # seconds of audio in the newest segment
+    asr_costs: list = []  # #1247: (audio s, ASR s) of the last ASR_COST_N live calls, for join_cap()
     last_marks = [None]  # (end of speech, cut, ASR done) of the newest transcribed segment (#323 on_record)
     clip = [None]  # #239: audio of the line being written (MT thread)
     seg_n = [0]  # #239: number of the newest transcribed segment (matches a final line to its audio)
@@ -418,6 +468,7 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
         Silence notices (_Quiet) between the joined segments are passed on right after the joined segment; segments
         below SILENCE_RMS are left out of the join, as the loop would have skipped them one by one."""
         joined, quiets, total = [item], [], len(item[0]) / SAMPLE_RATE
+        cap = join_cap(asr_costs)  # #1247: a join must not hold the screen without a new line for > ~ASR_JOIN_CALL_S
         while True:
             try:
                 nxt = back.pop(0) if back else q.get_nowait()
@@ -426,7 +477,7 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
             if isinstance(nxt, _Quiet):
                 quiets.append(nxt)
                 continue
-            if type(nxt) is not tuple or total + len(nxt[0]) / SAMPLE_RATE > ASR_JOIN_MAX_S:
+            if type(nxt) is not tuple or total + len(nxt[0]) / SAMPLE_RATE > cap:
                 back.insert(0, nxt)  # _DONE / an error, or no room: handled next, in order
                 break
             joined.append(nxt)
@@ -498,6 +549,10 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
             last_asr[0] = time.monotonic() - t0
             marks = (t_eos, t_cut, t0 + last_asr[0])
             last_len[0] = len(seg) / SAMPLE_RATE
+            if not audio_clock:  # #1247: a budget-cut call counts with the audio it decoded (its tail comes next)
+                cut = len(tail) / SAMPLE_RATE if tail is not None and len(tail) else 0.0
+                asr_costs.append((last_len[0] - cut, last_asr[0]))
+                del asr_costs[:-ASR_COST_N]
             say(f"latency: asr {last_asr[0] * 1000:.0f} ms for {len(seg) / SAMPLE_RATE:.1f} s of audio"
                 f" ({mtq.qsize()} line(s) waiting for MT)")
             if t is None or is_hallucination(t.text, float(np.sqrt(np.mean(seg ** 2))), t.no_speech):
