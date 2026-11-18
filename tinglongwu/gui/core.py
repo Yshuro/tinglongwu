@@ -2,6 +2,7 @@
 
 Worker threads only ever put tuples on a queue.Queue; the tkinter main thread polls it with after().
 Events: ("draft", src_text, translation) | ("final", src_text, target_text) | ("clear",) |
+        ("amend", replaced_src_text, src_text, target_text) (#1395: replaces that final line) |
         ("status", text) | ("notice", text) | ("error", text) | ("stopped",)
 """
 from __future__ import annotations
@@ -38,7 +39,7 @@ DEFAULTS = {
     "scene": "video",  # 0.3.8: the 情境 row: "meeting" (listen + speak) or "video" (listen only); last choice kept
     "speaker_id": False,  # 0.3.8: 標示說話者; off = sherpa-onnx and the speaker model are never loaded
     "topics": None,  # #611: topic notes side panel; None = default (on with CUDA, off on CPU-only), True/False = chosen
-    "topics_model": "",  # #611: local GGUF instruct model for --topics ("" = none: no topic notes)
+    "topics_model": "",  # #611: local GGUF for --topics; "" = the downloaded #1378 default (TOPICS_KEY), if installed
     "send_mode": "auto",  # #834/#1052: how a speak line is sent (auto = straight away, confirm = show me first); owner default: auto
 }
 SEND_MODES = ("confirm", "countdown", "auto")  # same choices as reverse.sendmode.MODES (the CLI keeps all three)
@@ -74,7 +75,7 @@ def restart_needed(at_start: dict, now: dict) -> list[str]:
 
 LANGS = SOURCE_LANGS  # auto, focus ja/en/ru, zh, then the experimental ones (#58)
 TARGETS = ["zh-tw", "zh-cn", "en", "ja", "ko", "es", "fr", "de", "th", "vi", "id"]  # #1163: Hy-MT2 direct targets
-ENGINES = ["auto", "hymt"]  # #276, #471: Hy-MT2 is the only engine offered (OPUS removed)
+ENGINES = ["auto", "hymt", "hymt7b"]  # #276, #471: Hy-MT2 only (OPUS removed); #1351: the opt-in 7B (GPU, never auto)
 # auto = what hwprobe recommends for this PC; fast / balanced / quality trade speed for accuracy on the same
 # hardware; manual = the Engine + Speech model boxes decide (#81)
 QUALITIES = ["auto", "fast", "balanced", "quality", "manual"]
@@ -630,8 +631,8 @@ def model_labels(mdir=None, ram_gb: float | None = None) -> list[str]:
             + [m + heavy(m) for m in MODELS if m not in have])  # #739: a missing model downloads on the first Start
 
 
-_ENGINE_DIR = {"hymt": "hymt2-1.8b"}  # models/<dir> per engine (auto needs no model of its own); #471: no opus
-_ENGINE_HINT = {"hymt": "tlwu-setup --hymt"}
+_ENGINE_DIR = {"hymt": "hymt2-1.8b", "hymt7b": "hymt2-7b"}  # models/<dir> per engine (auto needs no model of its own); #471: no opus
+_ENGINE_HINT = {"hymt": "tlwu-setup --hymt", "hymt7b": "tlwu-setup --hymt7b"}
 
 
 def engine_labels(mdir=None) -> list[str]:
@@ -641,6 +642,24 @@ def engine_labels(mdir=None) -> list[str]:
     d = models_dir(str(mdir) if mdir else None)
     return [choice_label("engine", e) if e == "auto" or (d / _ENGINE_DIR[e]).is_dir() else f"{e} ({_ENGINE_HINT[e]})"
             for e in ENGINES]
+
+
+def engine_model_missing(s: dict, mdir=None) -> str | None:
+    """#1351: the localized line to show instead of starting when Quality is Manual, Engine is the opt-in hymt7b and
+    its model is not downloaded (the CLI would exit with a setup command the GUI never shows, #885); else None.
+    hymt (1.8B) is not checked: --mt-pending shows source text while it downloads (#1375)."""
+    from ..hymt import hymt_path
+    from ..i18n import t
+    from ..models import models_dir
+
+    if s.get("quality") != "manual" or s.get("engine") != "hymt7b":
+        return None
+    try:
+        if hymt_path(models_dir(str(mdir) if mdir else None), "7b").is_file():  # the file make_translator loads
+            return None
+    except Exception:  # noqa: BLE001 - an unreadable path: let the run report its own error
+        return None
+    return t("gui_error_hymt7b_missing")
 
 
 def engine_from_label(label: str) -> str:
@@ -780,13 +799,62 @@ def parse_progress(line: str) -> int | None:
     return min(100, int(m[-1])) if m else None
 
 
-def missing_start_model(run: dict, mdir=None) -> str | None:
-    """#739: the Whisper model a Start needs but does not have on disk (manual quality only; the other qualities
-    let the CLI pick from what is installed), else None."""
+def missing_start_model(run: dict, mdir=None, want: str | None = None) -> str | None:
+    """#739: the Whisper model a Start needs but does not have on disk, else None. Manual quality: the picked model.
+    #1385: the other qualities: `want`, the model quality_speech_model() named in the Quality hint (Accurate on a
+    fresh install needs a larger model than the one setup fetched; before, the CLI silently kept the small one)."""
     if run.get("quality") != "manual":
-        return None
+        return None if not want or is_downloaded(want, mdir) else want
     m = run.get("model") or "small"
     return None if is_downloaded(m, mdir) else m
+
+
+# #1385: approximate first download per speech model in MB, shown before a Start downloads it. small and
+# large-v3-turbo = tlwu_app/tiers.py SIZES (464 / 1640 MiB); the others = model.bin of the faster-whisper repos
+# pinned in tinglongwu_setup/manifest.json (tiny 75, base 145, medium 1530, large-v3 3090 MB on Hugging Face).
+WHISPER_MB = {"tiny": 75, "base": 145, "small": 486, "medium": 1530, "large-v3": 3090, "large-v3-turbo": 1720}
+# #1385: plain words per speech model; CPU and GPU differ (turbo is the GPU default but slow on a CPU, #63 / #131)
+_ASR_WORDS_CPU = {"tiny": "gui_asr_fast", "base": "gui_asr_fast", "small": "gui_asr_balanced"}
+_ASR_WORDS_GPU = {"tiny": "gui_asr_fast", "base": "gui_asr_fast", "small": "gui_asr_fast",
+                  "medium": "gui_asr_balanced", "large-v3-turbo": "gui_asr_balanced"}
+
+
+def quality_speech_model(level: str, cuda: bool, hw=None, mdir=None, manual_model: str | None = None,
+                         want=None) -> str:
+    """#1385: the speech model a Start with this Quality uses on this PC. Manual: the picked model. Accurate: the
+    tier's model even when it is not downloaded yet (the Start downloads it, missing_start_model). Fast / Auto /
+    Balanced: what the CLI's auto_model picks (the tier's model, else the best downloaded one).
+    `want` = cli.want_model (injected in tests); `hw` = hwprobe.probe() result, probed when None."""
+    from ..models import pick_whisper
+
+    if level == "manual":
+        return manual_model or "small"
+    if want is None:
+        from ..cli import want_model as want
+    model, tier = want(level, "cuda" if cuda else "cpu", hw)
+    return model if level == "quality" else pick_whisper(model, mdir, tier)
+
+
+def download_size_text(model: str) -> str:
+    """#1385: "about 1.7 GB" style size of a speech model's first download ("" when unknown)."""
+    mb = WHISPER_MB.get(model)
+    if mb is None:
+        return ""
+    return f"{mb / 1000:.1f} GB" if mb >= 1000 else f"{mb} MB"
+
+
+def quality_hint(model: str, cuda: bool, downloaded: bool) -> str:
+    """#1385: the line under the Speed buttons: which speech model runs, in plain words, and (before any download)
+    how big its download is. Example: "Speech model: large-v3-turbo (most accurate, slower on this PC). The next
+    Start downloads it first (about 1.7 GB)." """
+    from ..i18n import t
+
+    words = (_ASR_WORDS_GPU if cuda else _ASR_WORDS_CPU).get(model, "gui_asr_accurate" if cuda else "gui_asr_slow")
+    line = t("gui_asr_line", model=model, words=t(words))
+    size = download_size_text(model)
+    if downloaded:
+        return f"{line} {t('gui_asr_have')}"
+    return f"{line} {t('gui_asr_download', size=size) if size else t('gui_asr_download_unknown')}"
 
 
 _UNIT = {"": 1, "k": 1e3, "m": 1e6, "g": 1e9, "t": 1e12}
@@ -839,14 +907,18 @@ class StartDownload:
                 self.error = (self._last or f"download failed (exit {ev[2]})").splitlines()[-1][:90]
 
 
-def run_pack_download(pack: str, put, mdir=None, popen=None, bundled: bool | None = None, cmd=None) -> int:
-    """Worker thread: run the pack download child; `put` gets ("pack_line", text) per line and ("pack_done", pack, rc)."""
+def run_pack_download(pack: str, put, mdir=None, popen=None, bundled: bool | None = None, cmd=None,
+                      on_start=None) -> int:
+    """Worker thread: run the pack download child; `put` gets ("pack_line", text) per line and ("pack_done", pack, rc).
+    on_start(proc): #1379: gets the child right after it started, so the GUI can cancel it (proc.terminate())."""
     import subprocess
 
     popen = popen or subprocess.Popen
     try:
         p = popen(cmd or pack_download_cmd(pack, mdir, bundled), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                   env=download_env(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if on_start is not None:
+            on_start(p)
         for raw in p.stdout:
             line = (raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw).replace("\r", "\n")
             parts = [x.strip() for x in line.split("\n") if x.strip()]
@@ -858,6 +930,13 @@ def run_pack_download(pack: str, put, mdir=None, popen=None, bundled: bool | Non
         rc = -1
     put(("pack_done", pack, rc))
     return rc
+
+
+def topics_download_cmd(mdir=None, bundled: bool | None = None) -> list[str]:
+    """#1379: same child as download_cmd, but `--topics` (the pinned meeting-notes GGUF) instead of `--whisper`."""
+    cmd = download_cmd("small", mdir, bundled)
+    i = cmd.index("--whisper")
+    return [*cmd[:i], "--topics", *cmd[i + 2:]]
 
 
 def voice_install_cmd(mdir=None, bundled: bool | None = None, ru: bool = False) -> list[str]:
@@ -874,11 +953,38 @@ def run_voice_install(put, mdir=None, popen=None, bundled: bool | None = None, r
                              cmd=voice_install_cmd(mdir, bundled, ru))
 
 
-def topics_on(s: dict, has_cuda=None) -> bool:
+# #1379: the meeting-notes model the #1378 bake-off picked (models/manifest.json key, pinned in tinglongwu_setup).
+TOPICS_KEY = "topics-qwen3-4b-2507"  # keep in sync with tinglongwu_setup.downloader.TOPICS_DIR
+TOPICS_FILE = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+TOPICS_MB = 2500  # 2 497 281 120 bytes (#1381 pin)
+
+
+def default_topics_model(mdir=None) -> str:
+    """#1379: path of the downloaded default notes model, or "" when it is not installed (the file exists AND the
+    local models/manifest.json pinned it: a half-finished download only leaves a .part file and no pin)."""
+    from ..models import models_dir
+
+    d = Path(models_dir(str(mdir) if mdir else None))
+    try:
+        pinned = TOPICS_KEY in json.loads((d / "manifest.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return ""
+    f = d / TOPICS_KEY / TOPICS_FILE
+    return str(f) if pinned and f.is_file() else ""
+
+
+def topics_model_path(s: dict, mdir=None) -> str:
+    """#1379: the notes model for these settings: a GGUF the user picked, else the downloaded default, else ""."""
+    model = s.get("topics_model") or ""
+    if model and os.path.isfile(model):
+        return model
+    return default_topics_model(mdir)
+
+
+def topics_on(s: dict, has_cuda=None, mdir=None) -> bool:
     """#611: run topic notes for these settings? Needs a model file; an unset choice follows topics_default
     (on with a CUDA device, off on CPU-only). has_cuda: None = probe."""
-    model = s.get("topics_model") or ""
-    if not model or not os.path.isfile(model):
+    if not topics_model_path(s, mdir):
         return False
     if s.get("topics") is not None:
         return bool(s["topics"])
@@ -911,10 +1017,11 @@ def settings_to_argv(s: dict, outputs: list[str] | None = None, notice=None) -> 
         argv += ["--capture-device", s["listen_device"]]
     if s.get("glossary"):
         argv += ["--glossary", s["glossary"]]
-    if s.get("save"):
+    notes = topics_on(s)
+    if s.get("save") or notes:  # #1379: the notes switch alone saves the transcript (--topics needs --save)
         argv += ["--save"] + ([s["save_path"]] if s.get("save_path") else [])
-        if topics_on(s):  # #611: the notes need the transcript (--topics needs --save)
-            argv += ["--topics", s["topics_model"]]
+    if notes:
+        argv += ["--topics", topics_model_path(s)]
     if s.get("voice"):  # #330: the CLI checks the output is not the captured device and exits with a reason
         dev = s.get("voice_device") or ""
         # #448: unplugged since it was saved. #710: the Speak cable is not in voice_outputs() (cables are hidden
@@ -989,6 +1096,8 @@ class QueueSink(Sink):
         if shared().check(r.original, r.target if r.src != r.tgt else ""):  # #1070: our own voice coming back
             return
         ev = ("final", r.original, r.target if r.src != r.tgt and r.target else r.original)
+        if r.replaces is not None:  # #1395: the previous line + a late fragment, shown in that line's place
+            ev = ("amend", r.replaces) + ev[1:]
         self.q.put(ev + (r.speaker,) if r.speaker else ev)  # 0.3.8: the async speaker token rides along
 
 
@@ -1123,6 +1232,13 @@ class SubtitleState:
             self.finals.append((ev[1], ev[2]))
             self.whos.append(ev[3] if len(ev) > 3 else None)
             del self.finals[:-self.max_lines], self.whos[:-self.max_lines]
+        elif kind == "amend":  # #1395 ("amend", replaced src, src, target[, speaker]): newest final with that src
+            i = next((k for k in range(len(self.finals) - 1, -1, -1) if self.finals[k][0] == ev[1]), None)
+            if i is None:  # scrolled out (or never shown): an ordinary final line
+                return self._apply(("final",) + ev[2:])
+            self.finals[i] = (ev[2], ev[3])
+            if len(ev) > 4:
+                self.whos[i] = ev[4]
         elif kind == "final_side":  # #1001: a speak-leg line next to a listen session: the draft row stays
             self.finals.append((ev[1], ev[2]))
             self.whos.append(None)

@@ -19,10 +19,13 @@ MESSAGES: dict[str, dict[str, str]] = {
     "en": {
         "gui_topics_menu": "Topic notes...",  # #611
         "gui_topics_title": "Topic notes",  # #611
-        "gui_topics_on": "Topic notes on",  # #611
         "gui_topics_model": "Model (.gguf)...",  # #611
-        "gui_topics_no_model": "Pick a local GGUF instruct model to write topic notes.",  # #611
-        "gui_topics_need_save": "Topic notes need a saved transcript: turn on Save in Settings.",  # #611
+        "gui_topics_no_model": "Turn on Meeting notes to download the notes model, or pick your own GGUF model.",  # #611
+        "gui_topics_switch": "Meeting notes",  # #1379
+        "gui_topics_lang": "Notes are written in {lang}, the language you read.",  # #1379
+        "gui_topics_cpu_off": "No GPU found: meeting notes are off by default on this PC. On a CPU a 5-minute topic takes about 4 minutes, so the notes arrive after the meeting. Turn them on if that is fine.",  # #1379
+        "gui_topics_downloading": "Downloading the notes model (about {mb} MB, once). Works offline afterwards.",  # #1379
+        "gui_topics_cancel": "Cancel download",  # #1379
         "gui_topics_empty": "Each finished topic shows up here during the meeting.",  # #611
         "rec_label": "● Recording",
         "rec_consent": "Recording is on: audio is saved on this computer only ({path}). Get the other side's consent before recording their voice.",
@@ -66,6 +69,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "voice_why_loop": "it would be recorded again",
         "voice_why_garbled": "the voice engine sent a garbled reply",
         "gui_error_generic": "Listening stopped because of a problem. Press Start to try again; if it keeps happening, report it from the Help menu.",
+        "gui_error_hymt7b_missing": "Hy-MT2 7B is not downloaded yet, so listening did not start. Set Engine back to Auto, or download the 7B model first (see Models in the docs).",  # #1351
         "voice_off": "Voice off: {why}. Subtitles continue",
         "gui_start": "Start",
         "gui_scene": "Scene:",
@@ -176,6 +180,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_set_fast": "Fast",
         "gui_set_auto": "Auto",
         "gui_set_accurate": "Accurate",
+        "gui_asr_line": "Speech model: {model} ({words}).",  # #1385
+        "gui_asr_fast": "fastest, less accurate",  # #1385
+        "gui_asr_balanced": "balanced speed and accuracy",  # #1385
+        "gui_asr_accurate": "most accurate",  # #1385
+        "gui_asr_slow": "more accurate, slower on this PC",  # #1385
+        "gui_asr_have": "Downloaded.",  # #1385
+        "gui_asr_download": "The next Start downloads it first (about {size}).",  # #1385
+        "gui_asr_download_unknown": "The next Start downloads it first.",  # #1385
         "gui_set_appear": "How subtitles appear",
         "gui_set_sentence": "After each sentence is finished",
         "gui_set_live": "As they speak (uses more of the graphics card)",
@@ -252,10 +264,13 @@ MESSAGES: dict[str, dict[str, str]] = {
     "ru": {
         "gui_topics_menu": "Заметки по темам...",  # #611
         "gui_topics_title": "Заметки по темам",  # #611
-        "gui_topics_on": "Заметки по темам включены",  # #611
         "gui_topics_model": "Модель (.gguf)...",  # #611
-        "gui_topics_no_model": "Выберите локальную GGUF-модель для заметок по темам.",  # #611
-        "gui_topics_need_save": "Для заметок нужна сохранённая расшифровка: включите сохранение в настройках.",  # #611
+        "gui_topics_no_model": "Включите «Заметки встречи», чтобы скачать модель заметок, или выберите свою GGUF-модель.",  # #611
+        "gui_topics_switch": "Заметки встречи",  # #1379
+        "gui_topics_lang": "Заметки пишутся на языке, который вы читаете: {lang}.",  # #1379
+        "gui_topics_cpu_off": "GPU не найден: на этом ПК заметки встречи по умолчанию выключены. На CPU 5-минутная тема обрабатывается около 4 минут, поэтому заметки появятся после встречи. Включите их, если это подходит.",  # #1379
+        "gui_topics_downloading": "Загрузка модели заметок (около {mb} МБ, один раз). Потом работает офлайн.",  # #1379
+        "gui_topics_cancel": "Отменить загрузку",  # #1379
         "gui_topics_empty": "Каждая завершённая тема появится здесь во время встречи.",  # #611
         "rec_label": "● Запись",
         "rec_consent": "Запись включена: звук сохраняется только на этом компьютере ({path}). Перед записью голоса собеседника получите его согласие.",
@@ -299,6 +314,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "voice_why_loop": "она снова попадёт в запись",
         "voice_why_garbled": "голосовой движок перестал отвечать правильно",
         "gui_error_generic": "Прослушивание остановлено из-за ошибки. Нажмите «Старт» ещё раз; если повторяется, сообщите об этом через меню «Справка».",
+        "gui_error_hymt7b_missing": "Hy-MT2 7B ещё не загружена, поэтому прослушивание не началось. Верните «Движок» на «Авто» или сначала загрузите модель 7B (см. раздел Models в документации).",  # #1351
         "voice_off": "Озвучка выключена: {why}. Субтитры продолжаются",
         "gui_start": "Старт",
         "gui_scene": "Сценарий:",
@@ -409,6 +425,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_set_fast": "Быстро",
         "gui_set_auto": "Авто",
         "gui_set_accurate": "Точно",
+        "gui_asr_line": "Модель речи: {model} ({words}).",  # #1385
+        "gui_asr_fast": "быстрее всего, менее точно",  # #1385
+        "gui_asr_balanced": "баланс скорости и точности",  # #1385
+        "gui_asr_accurate": "точнее всего",  # #1385
+        "gui_asr_slow": "точнее, медленнее на этом ПК",  # #1385
+        "gui_asr_have": "Загружена.",  # #1385
+        "gui_asr_download": "Следующий «Старт» сначала загрузит её (около {size}).",  # #1385
+        "gui_asr_download_unknown": "Следующий «Старт» сначала загрузит её.",  # #1385
         "gui_set_appear": "Как появляются субтитры",
         "gui_set_sentence": "После каждого предложения",
         "gui_set_live": "По мере речи (больше нагрузка на видеокарту)",
@@ -485,10 +509,13 @@ MESSAGES: dict[str, dict[str, str]] = {
     "zh-TW": {
         "gui_topics_menu": "主題筆記...",  # #611
         "gui_topics_title": "主題筆記",  # #611
-        "gui_topics_on": "開啟主題筆記",  # #611
         "gui_topics_model": "模型 (.gguf)...",  # #611
-        "gui_topics_no_model": "請選一個本機 GGUF 指令模型來寫主題筆記。",  # #611
-        "gui_topics_need_save": "主題筆記需要存逐字稿：請在設定開啟儲存。",  # #611
+        "gui_topics_no_model": "開啟「會議重點」即可下載重點模型，或自選一個 GGUF 模型。",  # #611
+        "gui_topics_switch": "會議重點",  # #1379
+        "gui_topics_lang": "重點以你閱讀的語言撰寫：{lang}。",  # #1379
+        "gui_topics_cpu_off": "沒有偵測到 GPU：這台電腦預設不開會議重點。用 CPU 整理一段 5 分鐘的主題約需 4 分鐘，重點會在會議結束後才出來。可以接受的話再開啟。",  # #1379
+        "gui_topics_downloading": "正在下載重點模型（約 {mb} MB，只需一次）。之後可離線使用。",  # #1379
+        "gui_topics_cancel": "取消下載",  # #1379
         "gui_topics_empty": "會議中每講完一個主題，就會出現在這裡。",  # #611
         "rec_label": "● 錄音中",
         "rec_consent": "錄音已開啟：聲音只存在這台電腦（{path}）。錄下對方的聲音前，請先取得對方同意。",
@@ -532,6 +559,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "voice_why_loop": "會被自己再錄進去",
         "voice_why_garbled": "語音引擎回應異常",
         "gui_error_generic": "發生問題，已停止聆聽。請再按一次開始；若一直出現，請從「說明」選單回報問題。",
+        "gui_error_hymt7b_missing": "Hy-MT2 7B 尚未下載，所以沒有開始聆聽。請把「引擎」改回「自動」，或先下載 7B 模型（見說明文件的 Models 頁）。",  # #1351
         "voice_off": "朗讀已關閉：{why}。字幕繼續",
         "gui_start": "開始",
         "gui_scene": "情境：",
@@ -642,6 +670,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_set_fast": "快",
         "gui_set_auto": "自動",
         "gui_set_accurate": "準",
+        "gui_asr_line": "語音模型：{model}（{words}）。",  # #1385
+        "gui_asr_fast": "最快，準確度較低",  # #1385
+        "gui_asr_balanced": "速度與準確度平衡",  # #1385
+        "gui_asr_accurate": "最準確",  # #1385
+        "gui_asr_slow": "較準確，在這台電腦上較慢",  # #1385
+        "gui_asr_have": "已下載。",  # #1385
+        "gui_asr_download": "下次按開始時會先下載（約 {size}）。",  # #1385
+        "gui_asr_download_unknown": "下次按開始時會先下載。",  # #1385
         "gui_set_appear": "字幕出現方式",
         "gui_set_sentence": "講完一句才出",
         "gui_set_live": "邊講邊出（較吃顯卡）",
@@ -718,10 +754,13 @@ MESSAGES: dict[str, dict[str, str]] = {
     "ja": {
         "gui_topics_menu": "トピックメモ...",  # #611
         "gui_topics_title": "トピックメモ",  # #611
-        "gui_topics_on": "トピックメモをオンにする",  # #611
         "gui_topics_model": "モデル (.gguf)...",  # #611
-        "gui_topics_no_model": "トピックメモを書くローカル GGUF 指示モデルを選んでください。",  # #611
-        "gui_topics_need_save": "トピックメモには文字起こしの保存が必要です。設定で保存をオンにしてください。",  # #611
+        "gui_topics_no_model": "「会議メモ」をオンにするとメモ用モデルをダウンロードします。自分の GGUF モデルを選ぶこともできます。",  # #611
+        "gui_topics_switch": "会議メモ",  # #1379
+        "gui_topics_lang": "メモはあなたが読む言語で書かれます：{lang}。",  # #1379
+        "gui_topics_cpu_off": "GPU が見つかりません：この PC では会議メモは既定でオフです。CPU では 5 分の話題に約 4 分かかるため、メモは会議の後に届きます。それでよければオンにしてください。",  # #1379
+        "gui_topics_downloading": "メモ用モデルをダウンロード中（約 {mb} MB、初回のみ）。その後はオフラインで使えます。",  # #1379
+        "gui_topics_cancel": "ダウンロードを中止",  # #1379
         "gui_topics_empty": "会議中、話し終えたトピックがここに表示されます。",  # #611
         "rec_label": "● 録音中",
         "rec_consent": "録音中です。音声はこのコンピューターにだけ保存されます（{path}）。相手の声を録音する前に同意を得てください。",
@@ -765,6 +804,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "voice_why_loop": "再び録音されてしまうため",
         "voice_why_garbled": "音声エンジンの応答が壊れていたため",
         "gui_error_generic": "問題が起きたため聞き取りを停止しました。「スタート」を押してもう一度試してください。繰り返す場合はヘルプメニューから報告してください。",
+        "gui_error_hymt7b_missing": "Hy-MT2 7B がまだダウンロードされていないため、聞き取りを開始しませんでした。「エンジン」を「自動」に戻すか、先に 7B モデルをダウンロードしてください（ドキュメントの Models を参照）。",  # #1351
         "voice_off": "読み上げオフ: {why}。字幕は続きます",
         "gui_start": "スタート",
         "gui_scene": "シーン：",
@@ -875,6 +915,14 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_set_fast": "速さ優先",
         "gui_set_auto": "自動",
         "gui_set_accurate": "精度優先",
+        "gui_asr_line": "音声モデル：{model}（{words}）。",  # #1385
+        "gui_asr_fast": "最速、精度は低め",  # #1385
+        "gui_asr_balanced": "速度と精度のバランス",  # #1385
+        "gui_asr_accurate": "最も高精度",  # #1385
+        "gui_asr_slow": "高精度、この PC では遅め",  # #1385
+        "gui_asr_have": "ダウンロード済み。",  # #1385
+        "gui_asr_download": "次の開始時に先にダウンロードします（約 {size}）。",  # #1385
+        "gui_asr_download_unknown": "次の開始時に先にダウンロードします。",  # #1385
         "gui_set_appear": "字幕の出方",
         "gui_set_sentence": "1 文が終わるごとに",
         "gui_set_live": "話している途中から（グラフィックカードを多く使用）",

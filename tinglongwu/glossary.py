@@ -14,7 +14,7 @@ Fully offline; reads local files only.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from collections.abc import Callable
 
@@ -43,24 +43,92 @@ def _stem(w: str) -> str:
     return w
 
 
+_RU_NOUN_ENDINGS = {  # #1425: case endings per final letter of the dictionary form (железо -> железе, тесты -> тестах)
+    "о": ("", "о", "а", "у", "е", "ом", "ы", "и", "ах", "ам", "ами"),
+    "е": ("", "е", "я", "ю", "ем", "и", "ях", "ям", "ями"),
+    "ы": ("", "ы", "ов", "ам", "ами", "ах"),
+    "и": ("", "и", "ей", "ям", "ями", "ях", "ов"),
+    "а": ("", "а", "у", "ы", "е", "ой", "ою", "и", "ах", "ам", "ами"),
+    "й": ("й", "я", "ю", "ем", "е", "и", "ев", "ей", "ям", "ях", "ями"),
+    "ь": ("ь", "я", "ю", "и", "е", "ем", "ью", "ей", "ям", "ях", "ями"),
+    "ю": ("ю", "", "я", "и", "е", "ей"),
+    "у": ("у", "", "и", "е", "ой"),
+    "я": ("", "я", "ю", "и", "е", "ей", "ею"),
+}
+
+
+_RU_PAST = {  # #1429 past tense; #1432 also 1pl/3pl future and imperative (задеплоим, задеплоят, задеплой, пофикси)
+    "и": ("ил", "ила", "ило", "или", "им", "ят", "ите", "и", "й", "йте", "ишь", "ю", "у"),
+    "а": ("ал", "ала", "ало", "али", "аем", "ают", "аете", "ай", "айте"),
+}
+
+_RU_1SG_ALT = {"с": "ш", "т": "ч", "з": "ж", "д": "ж"}  # #1434: 1sg consonant alternation (пофикс- -> пофикшу, откат- -> откачу)
+
+_RU_MASC_ENDINGS = ("", "а", "у", "ом", "е", "ы", "и", "ов", "ам", "ами", "ах", "ей")
+
+
+def _ru_noun_ok(word: str, src_word: str, stem: str) -> bool:
+    """#1425: a built-in Russian noun fires only on its own case forms, not on other words with the same stem
+    (железо vs железная дорога, тесты vs тесто). Verbs (-ть) keep the plain prefix match."""
+    src = _norm(src_word)
+    if word == src:
+        return True
+    if src.endswith(("ить", "ать")) and len(src) >= 6:
+        base = src[:-3]
+        for w in (word, word[:-2] if word.endswith(("ся", "сь")) else None):  # #1439: reflexive (задеплоился, откатилось)
+            if w and w[:len(base)] == base and w[len(base):] in _RU_PAST[src[-3]]:
+                return True  # #1429/#1432: past, 1pl/3pl future, imperative (задеплоил, задеплоим, пофикси); other forms fall through to the prefix match
+    if src.endswith("ить") and len(src) >= 6:
+        alt = _RU_1SG_ALT.get(src[-4])
+        if alt and word in (src[:-4] + alt + "у", src[:-4] + alt + "ю"):
+            return True  # #1434: 1sg with consonant alternation (пофикшу, откачу)
+    if src.endswith("ка") and word in (src[:-2] + "ок", src[:-2] + "ек"):
+        return True  # #1428: genitive plural with a fleeting vowel (прошивка -> прошивок, ветка -> веток)
+    if stem == src and src[-1:] in "ая" and len(src) >= 3:
+        stem = src[:-1]  # #1428: short -а / -я nouns decline like long ones (фича -> фичам, фичах, фичами)
+    if not word.startswith(stem):
+        return False
+    if src.endswith("ть"):
+        return True
+    ends = _RU_NOUN_ENDINGS.get(src[-1:]) if stem != src else _RU_MASC_ENDINGS
+    if ends is None:
+        return True  # unknown final letter: keep the plain prefix match rather than lose the term
+    return word[len(stem):] in ends
+
+
 @dataclass
 class Entry:
     sources: list[str]
     target: str | None = None
     wrong: list[str] = field(default_factory=list)  # known wrong renderings of `target` (fixed after MT)
     asr_hint: bool = True  # False for the built-in list (#256): MT prompt / output only, never a Whisper hotword
+    mt_hint: bool = True  # False for the default hotwords (#1397): Whisper hint only, never in the MT prompt
+    ru_noun: bool = False  # #1425: built-in Russian entries match their own noun case forms only
+    whole_short: bool = False  # #1396: stems of <= SHORT_LATIN chars match whole words only (прод must not fire on продолжение)
 
     @property
     def main(self) -> str:
         return self.sources[0]
 
+    @staticmethod
+    def _short_ok(word: str, stem: str) -> bool:
+        """#1396: a short stem (прод, лог) matches itself or itself plus one ending letter (проде, логи), never a
+        longer word (продолжение, логика)."""
+        return word == stem or (len(word) == len(stem) + 1 and word.startswith(stem))
+
     def matches(self, words: list[str]) -> bool:
         for src in self.sources:
-            stems = [_stem(w) for w in _WORD.findall(src)]
+            src_words = _WORD.findall(src)
+            stems = [_stem(w) for w in src_words]
             if not stems:
                 continue
             for i in range(len(words) - len(stems) + 1):
-                if all(words[i + j].startswith(s) if _prefix_ok(s) else words[i + j] in ((s, s + "s", s + "es") if s.isalpha() else (s,))
+                if self.ru_noun and all(_ru_noun_ok(words[i + j], src_words[j], s) for j, s in enumerate(stems)):
+                    return True
+                if self.ru_noun:
+                    continue
+                if all(self._short_ok(words[i + j], s) if self.whole_short and len(s) <= SHORT_LATIN else
+                       words[i + j].startswith(s) if _prefix_ok(s) else words[i + j] in ((s, s + "s", s + "es") if s.isalpha() else (s,))
                        for j, s in enumerate(stems)):
                     return True
         return False
@@ -87,7 +155,7 @@ class Glossary:
 
     def relevant(self, *texts: str) -> list[Entry]:
         words = [_norm(w) for t in texts for w in _WORD.findall(t)]
-        return [e for e in self.entries if e.matches(words)][:MAX_PROMPT_ENTRIES]
+        return [e for e in self.entries if e.mt_hint and e.matches(words)][:MAX_PROMPT_ENTRIES]
 
     def prompt_block(self, *texts: str) -> str:
         """Short instruction for the LLM, only with entries that occur in `texts`; '' if none."""
@@ -164,15 +232,79 @@ def load(path) -> Glossary:
 
 
 BUILTIN_PATH = Path(__file__).parent / "data" / "tech-dev.txt"
+BUILTIN_RU_PATH = Path(__file__).parent / "data" / "tech-ru.txt"
 
 
-def load_builtin() -> Glossary:
+def load_builtin(lang: str | None = None) -> Glossary:
     """The built-in tech/dev list (#256). Its terms are not Whisper hotwords: biasing every talk towards
-    "daemon, driver, kernel, ..." would make Whisper hear them where they were not said."""
+    "daemon, driver, kernel, ..." would make Whisper hear them where they were not said.
+    #1396: with source language `lang` Russian (or unknown / "auto", the terms are Cyrillic and only fire on
+    Russian words) the Russian software slang list is added; any other language gets the English list only."""
     g = load(BUILTIN_PATH)
+    if not lang or lang == "auto" or lang.lower().split("-")[0] == "ru":
+        ru = parse(BUILTIN_RU_PATH.read_text(encoding="utf-8-sig"))
+        for e in ru:
+            e.ru_noun = True
+            e.whole_short = True  # inflected forms of short terms are listed as extra spellings in the file
+        g.entries.extend(ru)
     for e in g.entries:
         e.asr_hint = False
     return g
+
+
+DEFAULT_HOTWORDS = {"ru": Path(__file__).parent / "data" / "hotwords-ru.txt"}  # #1397, per source language
+# Languages whose default list is on without the env switch (scripts/bench/acronym_eval.py decides). ru shipped by
+# eval-terms run 44084227768 (#1409): acronym accuracy 71.0% -> 86.8% (38 clips), false insertions 1 -> 1 (12
+# distractors), standard ru set (20 FLEURS clips) WER 7.7% -> 7.4%.
+DEFAULT_HOTWORDS_SHIPPED: frozenset[str] = frozenset({"ru"})
+DEFAULT_HOTWORDS_ENV = "TLWU_DEFAULT_HOTWORDS"  # "1": on for every language that has a list; "0": off
+
+
+def default_hotwords_on(lang: str | None, env: dict | None = None) -> bool:
+    """The default hotword list applies only to a fixed source language that has one (not "auto": the list would
+    bias every other language towards Latin acronyms)."""
+    import os
+
+    code = (lang or "").lower().split("-")[0]
+    if code not in DEFAULT_HOTWORDS:
+        return False
+    sw = (os.environ if env is None else env).get(DEFAULT_HOTWORDS_ENV, "")
+    if sw in ("0", "1"):
+        return sw == "1"
+    return code in DEFAULT_HOTWORDS_SHIPPED
+
+
+def load_default_hotwords(lang: str) -> Glossary:
+    """The default hotwords of `lang` (#1397) as hint entries: Whisper hotwords only (mt_hint False)."""
+    g = load(DEFAULT_HOTWORDS[lang.lower().split("-")[0]])
+    for e in g.entries:
+        e.asr_hint, e.mt_hint = True, False
+    return g
+
+
+def add_hotwords(g: Glossary | None, defaults: Glossary) -> Glossary:
+    """Append default hotwords after the existing entries (#1397). An entry that already has the spelling wins: a
+    user entry stays as it is; a built-in MT entry (asr_hint False) keeps its translation and becomes a hotword too."""
+    entries = list(g.entries) if g else []
+    have = {}
+    for i, e in enumerate(entries):
+        for s in e.sources:
+            have.setdefault(_norm(s), i)
+    for d in defaults.entries:
+        hit = next((have[_norm(s)] for s in d.sources if _norm(s) in have), None)
+        if hit is None:
+            entries.append(d)
+        elif not entries[hit].asr_hint:
+            entries[hit] = replace(entries[hit], asr_hint=True)
+    return Glossary(entries)
+
+
+def with_default_hotwords(g: Glossary | None, lang: str | None, face_to_face=None, env: dict | None = None):
+    """The CLI's glossary plus the default hotwords of the source language when they are on (#1397); face-to-face
+    switches the source language per utterance, so it gets none."""
+    if face_to_face or not default_hotwords_on(lang, env):
+        return g
+    return add_hotwords(g, load_default_hotwords(lang))
 
 
 def merge(user: Glossary | None, base: Glossary) -> Glossary:

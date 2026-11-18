@@ -86,7 +86,7 @@ def test_settings_to_argv_parses():
     s = dict(core.DEFAULTS, lang="ru", target="zh-cn", quality="manual", engine="hymt", glossary="g.txt", save=True)
     a = parse_args(core.settings_to_argv(s))
     assert (a.lang, a.to, a.zh_variant, a.engine, a.glossary, a.save) == ("ru", "zh", "cn", "hymt", "g.txt", "")
-    assert core.ENGINES == ["auto", "hymt"]  # #471: OPUS is no longer offered
+    assert core.ENGINES == ["auto", "hymt", "hymt7b"]  # #471: OPUS is no longer offered; #1351: 7B opt-in
     assert parse_args(core.settings_to_argv(dict(s, engine="opus"))).engine == "auto"  # old gui.json: no exit 2
     a = parse_args(core.settings_to_argv(dict(core.DEFAULTS, target="en", save=True, save_path="o.jsonl")))
     assert (a.to, a.save) == ("en", "o.jsonl")
@@ -663,10 +663,12 @@ def test_speak_keeps_my_language_remembered(gui_app, tmp_path, monkeypatch):
 
 def test_engine_labels_hint_for_uninstalled_and_roundtrip(tmp_path):
     auto = core.choice_label("engine", "auto")  # #884: shown by name in the UI language
-    assert core.engine_labels(tmp_path) == [auto, "hymt (tlwu-setup --hymt)"]  # missing: hint; #471: no opus
+    assert core.engine_labels(tmp_path) == [auto, "hymt (tlwu-setup --hymt)",
+                                            "hymt7b (tlwu-setup --hymt7b)"]  # missing: hint; #471: no opus
     (tmp_path / "hymt2-1.8b").mkdir()
+    (tmp_path / "hymt2-7b").mkdir()
     labels = core.engine_labels(tmp_path)
-    assert labels == [auto, "hymt"]  # installed: plain
+    assert labels == [auto, "hymt", "hymt7b"]  # installed: plain
     assert [core.engine_from_label(l) for l in labels] == core.ENGINES
     assert core.DEFAULTS["advanced_open"] is False
 
@@ -778,3 +780,35 @@ def test_mic_off_note_keeps_other_notice_1042(gui_app):
     a._mic_toggled()
     assert a.v_notice.get() == "no cable here"
     a.listening = False
+
+
+def test_hymt7b_opt_in_reachable_from_settings_1351(tmp_path):
+    """#1351 (owner A1): Hy-MT2 7B stays opt-in, picked by hand in Advanced (Quality: Manual), never by auto."""
+    from tinglongwu.cli import parse_args
+
+    s = dict(core.DEFAULTS, quality="manual", engine="hymt7b")
+    assert parse_args(core.settings_to_argv(s)).engine == "hymt7b"
+    assert core.engine_from_label("hymt7b (tlwu-setup --hymt7b)") == "hymt7b"
+    assert core.DEFAULTS["engine"] == "auto"  # the default is unchanged (1.8B through auto)
+    assert "--engine" not in core.settings_to_argv(dict(s, quality="auto"))  # no auto-switch outside Manual
+    f = tmp_path / "gui.json"
+    assert core.save_settings(s, f)
+    assert core.load_settings(f, gpu=lambda: True)["engine"] == "hymt7b"  # a saved 7B choice survives a restart
+
+
+def test_hymt7b_missing_model_message_1351(tmp_path, monkeypatch):
+    """#1351: Manual + hymt7b without its model -> a localized line (no CLI flag) instead of a silent stop."""
+    from tinglongwu import i18n
+
+    monkeypatch.setattr(i18n, "_override", "en")
+    s = dict(core.DEFAULTS, quality="manual", engine="hymt7b")
+    msg = core.engine_model_missing(s, tmp_path)
+    assert msg and "7B" in msg and "--" not in msg
+    assert core.engine_model_missing(dict(s, quality="auto"), tmp_path) is None  # auto never runs 7B
+    assert core.engine_model_missing(dict(s, engine="hymt"), tmp_path) is None  # 1.8B: --mt-pending handles it
+    (tmp_path / "hymt2-7b").mkdir()
+    (tmp_path / "hymt2-7b" / "LICENSE.txt").write_text("Apache-2.0")
+    assert core.engine_model_missing(s, tmp_path) == msg  # interrupted download: folder but no GGUF
+    (tmp_path / "hymt2-7b" / "Hy-MT2-7B-Q4_K_M.gguf").write_bytes(b"x")
+    assert core.engine_model_missing(s, tmp_path) is None  # installed: starts as usual
+    assert core.gui_error_text(SystemExit("tlwu: run `tlwu-setup --hymt7b`")) == i18n.t("gui_error_generic")

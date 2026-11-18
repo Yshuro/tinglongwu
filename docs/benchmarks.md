@@ -37,22 +37,24 @@ The Korean and tier-2 rows (#656) come from [eval-flores 43535177705](https://gi
 ### Language-pair matrix: en / ru / zh-Hans / zh-Hant / ja / ko (#1305)
 Every direction between the six languages (30 cells, rows = source, columns = target), Hy-MT2-1.8B Q4_K_M on the CPU, greedy, first 200 FLORES-200 devtest sentences per direction (the full 1012 stay for the X -> zh-Hant rows above), same chrF + COMET. Each cell is `COMET / chrF`; "(weak)" marks a cell whose COMET is below the weakest shipped direction (en / ru / ja / ko -> zh-Hant) of the same run. zh-Hans <-> zh-Hant is OpenCC script conversion (`tinglongwu.translate.zh_convert`), not MT, as in the app. Directions the app cannot select today are measured too: the table is the data for deciding what to enable. Run it with `gh workflow run eval-flores.yml --ref dev -f matrix=6x6`; the `table` job writes the table to its step summary and the `flores-6x6-table` artifact.
 
-Results: [eval-flores 43893644257](https://github.com/sunososobro-hub/tinglongwu/actions/runs/43893644257) (`matrix=6x6`), commit 1bc72da, first 200 sentences per direction, 4 vCPU GitHub runner. Weakest shipped direction in this run: ru -> zh-Hant, COMET 0.870, so "(weak)" = COMET below 0.870 (COMET is stored to 3 decimals; 0.870 itself is not weak).
+Results: [eval-flores 44099762645](https://github.com/sunososobro-hub/tinglongwu/actions/runs/44099762645) (`matrix=6x6`, after the #1351 echo fix), commit 8a6c5b2, first 200 sentences per direction, 4 vCPU GitHub runner. Weakest shipped direction in this run: ru -> zh-Hant, COMET 0.870, so "(weak)" = COMET below 0.870 (COMET is stored to 3 decimals; 0.870 itself is not weak).
 
-Traffic lights by COMET (rounded to 3 decimals): 🟢 >= 0.880, 🟡 0.870-0.879, 🔴 < 0.870 (0.870 = weakest shipped direction in this run, ru -> zh-Hant). `G` = Google Cloud Translation v2 COMET with the gap to ours (positive = Google ahead); `G -` = no Google number yet. The Google numbers come from different sentence sets (ru -> zh-Hant 1012 sentences, ru -> en and en -> zh-Hant 50) and are listed in `scripts/bench/data/google_refs.json`; ours are the first 200. The table is generated: `python scripts/bench/matrix_lights.py scripts/bench/data/matrix_6x6_43893644257.json` (the `table` job of `eval-flores.yml` prints it for every `matrix=6x6` run). chrF per cell stays in the run's `flores-6x6-table` artifact.
+Traffic lights by COMET (rounded to 3 decimals): 🟢 >= 0.880, 🟡 0.870-0.879, 🔴 < 0.870 (0.870 = weakest shipped direction in this run, ru -> zh-Hant). `G` = Google Cloud Translation v2 COMET with the gap to ours (positive = Google ahead); `G -` = no Google number yet. The Google numbers come from different sentence sets (ru -> zh-Hant 1012 sentences, ru -> en and en -> zh-Hant 50) and are listed in `scripts/bench/data/google_refs.json`; ours are the first 200. The table is generated: `python scripts/bench/matrix_lights.py scripts/bench/data/matrix_6x6_44099762645.json` (the `table` job of `eval-flores.yml` prints it for every `matrix=6x6` run). After every published release, `eval-matrix-release.yml` runs the matrix once on the release tag (never a release gate) and opens a `[eval] refresh the 6x6 matrix ...` issue with the new table, so this section is updated by a normal PR. chrF per cell stays in the run's `flores-6x6-table` artifact.
 
 | source \ target | en | ru | zh-Hans | zh-Hant | ja | ko |
 |---|---|---|---|---|---|---|
 | **en** |  | 🟢 0.889<br>G - | 🟢 0.892<br>G - | 🟢 0.893<br>G 0.900 (gap +0.007) | 🟢 0.919<br>G - | 🟢 0.904<br>G - |
-| **ru** | 🔴 0.854<br>G 0.883 (gap +0.029) |  | 🔴 0.865<br>G - | 🟡 0.870<br>G 0.879 (gap +0.009) | 🟢 0.882<br>G - | 🔴 0.863<br>G - |
+| **ru** | 🔴 0.861<br>G 0.883 (gap +0.022) |  | 🔴 0.865<br>G - | 🟡 0.870<br>G 0.879 (gap +0.009) | 🟢 0.882<br>G - | 🔴 0.863<br>G - |
 | **zh-Hans** | 🟡 0.874<br>G - | 🟢 0.885<br>G - |  | 🟢 0.920 (script conversion)<br>G - | 🟢 0.906<br>G - | 🟢 0.883<br>G - |
 | **zh-Hant** | 🔴 0.866<br>G - | 🟡 0.870<br>G - | 🟢 0.907 (script conversion)<br>G - |  | 🟢 0.902<br>G - | 🟡 0.879<br>G - |
-| **ja** | 🔴 0.868<br>G - | 🟡 0.871<br>G - | 🟢 0.884<br>G - | 🟢 0.889<br>G - |  | 🟢 0.887<br>G - |
-| **ko** | 🔴 0.868<br>G - | 🟡 0.870<br>G - | 🟡 0.874<br>G - | 🟢 0.882<br>G - | 🟢 0.898<br>G - |  |
+| **ja** | 🔴 0.869<br>G - | 🟡 0.871<br>G - | 🟢 0.884<br>G - | 🟢 0.889<br>G - |  | 🟢 0.887<br>G - |
+| **ko** | 🟡 0.877<br>G - | 🟡 0.870<br>G - | 🟡 0.874<br>G - | 🟢 0.882<br>G - | 🟢 0.898<br>G - |  |
 
-17 green / 7 yellow / 6 red (green >= 0.880, yellow 0.870-0.879, red < 0.870); largest gap to Google: ru -> en +0.029
+17 green / 8 yellow / 5 red (green >= 0.880, yellow 0.870-0.879, red < 0.870); largest gap to Google: ru -> en +0.022
 
-- Into English is the weakest target on COMET (0.854-0.874) although its chrF is the highest (54.5-58.2): chrF is not comparable across target languages (character n-grams in English vs Chinese / Japanese), compare cells of one column only.
+Cells whose COMET changed by >= 0.005 vs the earlier run 43893644257 (before the #1351 echo fix): ru -> en 0.854 -> 0.861, ko -> en 0.868 -> 0.877. All other cells moved by <= 0.001. The `echo` category of `flores_cpu.py --breakdown` is 0 sentences (0%) in all 30 cells of this run.
+
+- Into English is the weakest target on COMET (0.861-0.877) although its chrF is the highest (54.5-58.5): chrF is not comparable across target languages (character n-grams in English vs Chinese / Japanese), compare cells of one column only.
 - Russian as the source is the weakest row (4 of 5 cells at or below the shipped floor); every direction into Russian stays at or above it (0.870-0.889).
 - Median s/sentence (CPU): -> zh 1.3-2.4, -> en 2.3-2.8, -> ja / ko 2.1-3.9, -> ru 4.1-4.4.
 
@@ -85,12 +87,32 @@ Fixes tried (ru -> zh-Hant / ru -> en, COMET / chrF / median s per sentence, CPU
 | Q8_0 GGUF + echo fix (`q8`) | 0.8749 / 25.86 / 4.38 | 0.8605 / 58.40 / 5.19 | Xeon 6975P-C |
 | card prompt + echo fix, rerun (baseline of the 7B run) | 0.8696 / 25.14 / 2.26 | 0.8613 / 58.51 / 2.55 | EPYC 7763 |
 | opt-in Hy-MT2-7B Q4_K_M + echo fix (`7b`, `tlwu-setup --hymt7b`) | 0.8765 / 26.14 / 10.68 | 0.8759 / 62.89 / 10.47 | Xeon 6975P-C |
+| Gemma 3 12B instruct Q4_K_M, plain instruction (`gemma3-12b`, bench only) | 0.8703 / 26.11 / 9.10 | 0.8745 / 63.63 / 9.22 | EPYC 9V45 |
+| Qwen3 8B Q4_K_M, plain instruction, thinking off (`qwen3-8b`, bench only) | 0.8696 / 26.97 / 8.95 | 0.8691 / 62.49 / 9.45 | Xeon 6975P-C |
 
 - Echo fix: ru -> en +0.0070 COMET (+0.26 chrF); ru -> zh-Hant identical to the last digit (greedy decoding gives the same text on every CPU, so the difference is only the fix). It changes no model call, only two regex substitutions on the output, so speed is unchanged; the s/sentence columns differ because each job got another runner CPU.
 - Naming the source language: slightly worse on both (-0.0008 / -0.0057), ruled out.
 - Q8_0: +0.0053 on ru -> zh-Hant, -0.0008 on ru -> en against the fixed Q4_K_M, below the +0.008 bar on both, and the file is about 1.9x the size of Q4_K_M (memory-bound on the CPU, #1198 measured the quant speeds); ruled out. Q5_K_M / Q6_K were not measured.
 - Hy-MT2-7B (run [44034316922](https://github.com/sunososobro-hub/tinglongwu/actions/runs/44034316922), commit 49eb2b6, `variants=card,7b`): +0.0069 COMET / +1.00 chrF on ru -> zh-Hant and +0.0146 COMET / +4.38 chrF on ru -> en against the 1.8B in the same run. The bigger model mostly fixes names and transliteration on ru -> en ("reference name missing" among all 200: 36% -> 28%; "Jamie Sиминоff" -> "Jamie Siminoff"). It does not fix domain senses: the cricket line (калитка = wicket) is still the lowest ru -> zh-Hant line ("大門"). The 7B is about 4.6x slower per sentence on the CPU (10.7 vs 2.3 s median, on different runner CPUs), so it fails the "no more than 10% slower" bar as a default. It stays opt-in for GPUs (#279) and is the best Hy-MT2 option for Russian sources. The +0.008 COMET bar is met on ru -> en but not on ru -> zh-Hant (+0.0069).
 - Not reached: COMET >= 0.88 on ru -> zh-Hant (1.8B 0.870, 7B 0.877) and ru -> en (1.8B 0.861, 7B 0.876). Even the 7B, about 4x the parameters, stays below 0.88 on both. On ru -> zh-Hant it is within 0.003 of Google Cloud Translation (0.879, full devtest). Everything tried within the Hy-MT2 family is measured: prompt, quantization, 1.8B vs 7B, and temperature (#107). The 0.88 target therefore needs a different model family, not a setting.
+- Other model families (run [44050647595](https://github.com/sunososobro-hub/tinglongwu/actions/runs/44050647595), commit c1f6911, `variants=gemma3-12b,qwen3-8b`; GGUF through llama.cpp's own chat template, one-line "Translate the following Russian text into English / Simplified Chinese. Output only the translation" instruction, greedy, zh output through the same `zh_convert` as Hy-MT2): Gemma 3 12B (`unsloth/gemma-3-12b-it-GGUF`, Gemma terms) 0.8703 ru -> zh-Hant / 0.8745 ru -> en; Qwen3 8B (`Qwen/Qwen3-8B-GGUF`, Apache-2.0) 0.8696 / 0.8691. Neither beats Hy-MT2-7B on COMET, and on ru -> zh-Hant both are within 0.001 of the shipped 1.8B while being about 4x slower per sentence (9 s median). The lowest lines are the same categories as for Hy-MT2 (named entities 70-75% of the 40 lowest, wrong sense / word choice), with no prompt artifacts (additions 0-5%, no Cyrillic left). Result: no CPU-sized open model measured here (1.8B to 12B, three families) reaches COMET 0.88 on either Russian row; the shipped Hy-MT2-1.8B stays the default and the 7B stays the opt-in for Russian sources.
+
+### Previous sentence as MT context, live (#1394)
+`eval-fragments` (#1258 set, Hy-MT2-1.8B Q4_K_M, greedy, 4 vCPU GitHub runner, every line translated alone and then with the previous source line in the model card's contextual prompt, same runner for both) now has 23 self-written Russian software-talk polysemy lines (`kind: polysemy`: ветка, упал прод, поднять сервер, залить, железо, сборка, стенд, тормозит, ключ, ...; `bad` lists the wrong everyday sense, so "invented %" is the wrong-sense rate there) and a median seconds per MT call. Run [44065598131](https://github.com/sunososobro-hub/tinglongwu/actions/runs/44065598131) (commit 52ca974). Reproduce: `gh workflow run eval-fragments.yml --ref <ref>`, or locally `python -m tlwu_eval --fragment-cases eval/fragment_cases.jsonl --device cpu --out fragments.json` with `TLWU_HYMT_TEMP=0`.
+
+| lines | n | chrF alone / with context | invented or wrong-sense % alone / with context | median s per line alone / with context |
+|---|---|---|---|---|
+| all (ru + en -> zh-Hant) | 79 | 26.1 / 27.3 | 10.1 / 5.1 | 0.918 / 1.129 (+23%) |
+| polysemy (ru -> zh-Hant) | 23 | 19.2 / 22.8 | 21.7 / 8.7 | 0.954 / 1.254 (+31%) |
+| fragment | 24 | 31.5 / 36.9 | 4.2 / 4.2 | 0.711 / 1.039 |
+| idiom | 18 | 23.0 / 23.2 | 11.1 / 5.6 | 1.078 / 1.231 |
+| number | 6 | 30.9 / 26.0 | 0.0 / 0.0 | 0.900 / 1.106 |
+| complete | 8 | 46.1 / 42.8 | 0.0 / 0.0 | 0.887 / 1.036 |
+
+- Quality: context helps where the issue said it would. On the polysemy lines the wrong-sense rate drops from 21.7% to 8.7% (5 of 23 lines to 2) and chrF rises 3.6; over all 79 lines invented content halves. Finished short lines (`complete`, `number`) lose 3-5 chrF with context (small n: 8 and 6 lines).
+- Speed: +23% median MT time per line (+0.21 s), +31% on the polysemy lines. The context sentence lengthens the prompt the CPU has to read for every line. That is over the issue's 15% bar, so the opt-in setting (`--mt-context` + GUI checkbox) is **not shipped**. The tested pipeline wiring (previous finished line of the same speaker and language, at most one sentence, not across a 4 s pause) is kept on branch `fix/1394` at commit efb1e6c for a later attempt.
+- COMET is not scored by this eval (chrF and the invented / wrong-sense rate only).
+- What could bring it under 15%: a shorter context (only the last few words of the previous line), or reusing llama.cpp's prompt cache across lines (the previous line is already in the cache as the last prompt's text, but in another position). Neither is measured.
 
 ### Hy-MT2 sampling temperature (#107)
 
