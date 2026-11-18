@@ -797,6 +797,8 @@ class App:
         """#939: re-grid when the Advanced card is narrower than the two-column layout needs (with hysteresis:
         the two-column width is measured while two columns are shown). While Advanced is collapsed the card's width
         comes from the other groups, not from the window, so it is ignored (it would lock the grid in one column)."""
+        if getattr(self, "_measuring_panel", False):  # #1556: our own measuring re-grid delivers stale <Configure> events (macOS)
+            return
         if not self.frm.winfo_ismapped():
             return
         if self.setting_cols == 2:
@@ -1212,21 +1214,26 @@ class App:
             self.panel.withdraw()
         else:
             self.panel.deiconify()
-            self.panel.update_idletasks()
-            self._apply_panel_geometry()
+            self._apply_panel_geometry(flush=True)  # #1556: the opening flush runs under the measuring guard too
             self.panel.lift()
 
-    def _apply_panel_geometry(self):
+    def _apply_panel_geometry(self, flush=False):
         """#939: minsize = the one-column width x the two-column height; restore the remembered size / position
         (never below minsize). The settings grid shows two columns whenever the window is wide enough."""
         p, s = self.panel, self.settings
-        self._set_setting_cols(1)
-        p.update_idletasks()
-        mw = p.winfo_reqwidth()
-        self._set_setting_cols(2)
-        p.update_idletasks()
-        self.two_col_w = self.frm.winfo_reqwidth()
-        mh = p.winfo_reqheight()
+        self._measuring_panel = True  # #1556: ignore <Configure> events caused by the measuring re-grids below
+        try:
+            if flush:
+                p.update_idletasks()
+            self._set_setting_cols(1)
+            p.update_idletasks()
+            mw = p.winfo_reqwidth()
+            self._set_setting_cols(2)
+            p.update_idletasks()
+            self.two_col_w = self.frm.winfo_reqwidth()
+            mh = p.winfo_reqheight()
+        finally:
+            self._measuring_panel = False
         p.minsize(mw, mh)
         self.panel_min = (mw, mh)
         w, h = s.get("panel_w"), s.get("panel_h")
