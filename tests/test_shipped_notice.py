@@ -65,3 +65,46 @@ def test_workflow_runs_on_schedule_and_dispatch_without_issues():
     on = wf.get("on", wf.get(True))
     assert on["schedule"][0]["cron"]
     assert on["workflow_dispatch"]["inputs"]["issues"]["required"] is False
+
+
+RELS = [  # GitHub order: newest first
+    {"tag_name": "v0.4.10", "prerelease": False},
+    {"tag_name": "v0.4.10-rc1", "prerelease": True},
+    {"tag_name": "v0.4.9", "prerelease": False},
+    {"tag_name": "v0.4.9-rc1", "prerelease": True},
+    {"tag_name": "v0.4.8-draft", "prerelease": False, "draft": True},
+]
+
+
+def test_previous_tag_final_skips_prereleases_so_their_fixes_get_a_final_note():
+    assert sn.previous_tag(RELS, "v0.4.10") == "v0.4.9"
+    assert sn.previous_tag(RELS, "v0.4.10-rc1") == "v0.4.9"
+    assert sn.previous_tag(RELS, "v0.4.9-rc1") is None
+    assert sn.previous_tag(RELS, "v9") is None
+
+
+def test_unannounced_tags_includes_prereleases_oldest_first_and_drops_drafts():
+    assert sn.unannounced_tags(RELS) == ["v0.4.9-rc1", "v0.4.9", "v0.4.10-rc1", "v0.4.10"]
+    assert sn.unannounced_tags(RELS, limit=2) == ["v0.4.10-rc1", "v0.4.10"]
+
+
+def test_cli_needs_exactly_one_of_tag_or_all():
+    import pytest
+    with pytest.raises(SystemExit):
+        sn.main([])
+    with pytest.raises(SystemExit):
+        sn.main(["--tag", "v1", "--all"])
+
+
+def test_issues_in_range_explicit_none_and_missing_prev_scan_whole_history(tmp_path, monkeypatch):
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "first (#1)")
+    _git(tmp_path, "tag", "v0.1.0")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "second (#2)")
+    _git(tmp_path, "tag", "v0.2.0")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sn, "_api", lambda path, token, *a, **k: {"body": "Closes #" + path.rsplit("/", 1)[1]})
+    assert sn.issues_in_range("r", "v0.2.0", "t") == [2]  # omitted: nearest earlier tag
+    assert sn.issues_in_range("r", "v0.2.0", "t", "v0.1.0") == [2]  # bounded
+    assert sn.issues_in_range("r", "v0.2.0", "t", None) == [2, 1]  # explicit None: whole history
+    assert sn.issues_in_range("r", "v0.2.0", "t", "v0.0.0-gone") == [2, 1]  # missing ref: no abort
