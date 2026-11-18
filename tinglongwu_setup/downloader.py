@@ -123,6 +123,7 @@ def pin_or_verify(man: dict, key: str, d: Path, source: dict, pin_files: dict | 
         print(f"pinned {key} ({len(files)} files)")
 
 
+MANUAL_INSTALL_DOC = "https://github.com/sunososobro-hub/tinglongwu/blob/dev/docs/install.md#manual-model-install"
 WHISPER_REPOS = {"large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo"}  # MIT; others: Systran
 
 
@@ -144,10 +145,21 @@ def resolve_hf(man: dict, key: str, repo: str) -> tuple[str, str, dict | None]:
 def get_whisper(man, mdir, size):
     key, dest = f"whisper-{size}", mdir / f"whisper-{size}"
     if not (dest.exists() and key in man):
-        from huggingface_hub import snapshot_download
-
         repo, rev, pf = resolve_hf(man, key, whisper_repo(size))
-        snapshot_download(repo, revision=rev, local_dir=str(dest))
+        if pf:  # #1499: pinned files come from /resolve/<rev>/<file>; no HF /api/ tree listing (blocked by proxies)
+            for f in pf:
+                if (dest / f).is_file() and sha256(dest / f) == pf[f]:
+                    continue  # kept from an earlier try, or placed by hand (manual install)
+                url = f"https://huggingface.co/{repo}/resolve/{rev}/{f}"
+                try:
+                    hf_get(repo, rev, [f], dest, pf)
+                except (OSError, ValueError) as e:  # URLError / HTTPError / socket errors; ValueError = bad SHA256
+                    sys.exit(f"Download failed: {e}. File: {url} (host huggingface.co; model.bin may redirect to a CDN "
+                             f"host). If your network blocks it, place the files by hand: {MANUAL_INSTALL_DOC}")
+        else:
+            from huggingface_hub import snapshot_download
+
+            snapshot_download(repo, revision=rev, local_dir=str(dest))
         src = {"repo": repo, "revision": rev}
     else:
         src = man[key]
@@ -298,7 +310,7 @@ def hf_get(repo: str, rev: str, files: list, dest: Path, pf: dict | None) -> Non
     for f in files:
         if pf and f in pf:
             resume.fetch(f"https://huggingface.co/{repo}/resolve/{rev}/{f}", dest / f, pf[f],
-                         opener=resume._open_range, label=dest.name if f.endswith(".gguf") else None)
+                         opener=resume._open_range, label=dest.name if f.endswith((".gguf", "model.bin")) else None)
         else:
             rest.append(f)
     if rest:
