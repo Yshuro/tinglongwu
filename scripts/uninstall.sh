@@ -47,6 +47,67 @@ if [ -d "$DIR" ] && [ ! -f "$DIR/scripts/linux_menu.sh" ] && [ ! -d "$DIR/tinglo
   echo "[x] $DIR is not a tinglongWu folder; set TLWU_DIR" >&2; exit 1
 fi
 
+# #1456: remove only what tinglongWu created in the models folder: the entries named in models/manifest.json
+# (key -> dir; opus-X -> opus/X; whisper-cpp-* -> whisper-cpp/), the manifest itself and the Kokoro folder.
+# Foreign files stay; the folder itself is removed only if it is empty afterwards.
+purge_models() {
+  local keys k
+  if [ -f "$MODELS/manifest.json" ]; then
+    # one path per line, relative to the models folder; whisper-cpp entries list only their own files
+    if ! command -v python3 >/dev/null 2>&1 || ! keys="$(python3 -c '
+import json, sys
+m = json.load(open(sys.argv[1]))
+for k, v in m.items():
+    if k.startswith("whisper-cpp-"):
+        for f in ((v or {}).get("files") or {}):
+            print("whisper-cpp/" + f)
+    elif k.startswith("opus-"):
+        print("opus/" + k[5:])
+    else:
+        print(k)
+' "$MODELS/manifest.json" 2>/dev/null)"; then
+      echo "[x] cannot read $MODELS/manifest.json (python3 missing or manifest invalid); kept $MODELS" >&2
+      FAILED=1; return
+    fi
+    while IFS= read -r k; do
+      case "$k" in ""|/*|*..*) continue ;; esac
+      # never delete through a symlink: a linked component could point at another tool's folder
+      local p="$MODELS" c rest="$k" linked=""
+      while [ -n "$rest" ]; do
+        c="${rest%%/*}"; p="$p/$c"
+        [ -L "$p" ] && { linked=1; break; }
+        case "$rest" in */*) rest="${rest#*/}" ;; *) rest="" ;; esac
+      done
+      if [ -n "$linked" ]; then echo "[x] refusing to remove '$MODELS/$k' (symlink in path)" >&2; FAILED=1; continue; fi
+      rm_path "$MODELS/$k"
+    done <<< "$keys"
+  fi
+  # Kokoro folder: only when it is a safe target strictly inside the models folder (KOKORO_DIR is overridable)
+  local kd mc
+  if [ -d "$KOKORO_DIR" ] && safe_target "$KOKORO_DIR"; then
+    kd="$(cd "$KOKORO_DIR" && pwd -P)"; mc="$(cd "$MODELS" && pwd -P)"
+    case "$kd/" in "$mc/"?*) rm_path "$KOKORO_DIR" ;; *) echo "[x] refusing to remove KOKORO_DIR '$KOKORO_DIR' (not inside $MODELS)" >&2; FAILED=1 ;; esac
+  elif [ -e "$KOKORO_DIR" ]; then
+    echo "[x] refusing to remove KOKORO_DIR '$KOKORO_DIR'" >&2; FAILED=1
+  fi
+  # keep the manifest for a retry when any deletion above failed
+  [ -n "$FAILED" ] || rm_path "$MODELS/manifest.json"
+  rmdir "$MODELS/whisper-cpp" "$MODELS/opus" 2>/dev/null
+  if rmdir "$MODELS" 2>/dev/null; then say "removed $MODELS"; else say "kept other files in $MODELS (not tinglongWu's)"; fi
+}
+
+if [ -n "$PURGE" ] && [ -d "$MODELS" ]; then
+  purge_models
+  # foreign files left in a models folder that lives inside a folder we are about to remove: refuse, never delete them
+  if [ -d "$MODELS" ]; then
+    m="$(cd "$MODELS" && pwd -P)"
+    for t in "$DIR" "$KOKORO_VENV"; do
+      [ -d "$t" ] || continue
+      c="$(cd "$t" && pwd -P)"
+      case "$m/" in "$c/"*) echo "[x] $MODELS still holds files that are not tinglongWu's and is inside $t; move them or the folder first" >&2; exit 1 ;; esac
+    done
+  fi
+fi
 rm_path "$DIR"
 rm_path "$KOKORO_VENV"
 # launcher written by mac_install.sh (only if it is ours)
@@ -65,10 +126,10 @@ for rc in "$HOME/.zprofile" "$HOME/.zshrc"; do
 done
 
 if [ -d "$MODELS" ]; then
-  if [ -n "$PURGE" ]; then rm_path "$MODELS"
+  if [ -n "$PURGE" ]; then :   # already purged before the app folder was removed
   elif [ -z "$YES" ] && ( : </dev/tty ) 2>/dev/null; then
     read -rp "Also delete downloaded models in $MODELS? [y/N] " ans </dev/tty || ans=""
-    case "$ans" in y|Y|yes|YES) rm_path "$MODELS" ;; *) say "kept $MODELS (use --purge to remove)" ;; esac
+    case "$ans" in y|Y|yes|YES) purge_models ;; *) say "kept $MODELS (use --purge to remove)" ;; esac
   else say "kept $MODELS (use --purge to remove)"; fi
 fi
 if [ "$(uname -s)" = "Darwin" ]; then
