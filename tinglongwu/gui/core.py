@@ -33,6 +33,7 @@ DEFAULTS = {
     "mic_device": "",  # #894: "" = the system default microphone; else one microphone name (Advanced)
     "voice": False, "voice_device": "",  # #330: speak each translated line on a separate output (off by default)
     "overlay_alpha": 0.82,  # #333: subtitle bar opacity (right-click > Opacity), kept across restarts
+    "gpu_pack_never_ask": False,  # #1525: "Don't ask again" on the GPU speed-up pack banner (gpu_offer.DISMISS_KEY)
     "tour_seen": False,  # #314: the first-launch "3 steps" overlay was closed with "Got it"
     "usage_asked": False,  # #680: the one-time "what do you mainly use it for?" question was answered or skipped
     "usage_use": "",  # #680: the answer (one of USAGE_CHOICES, "" = none); local only, never sent anywhere
@@ -587,15 +588,43 @@ def mt_path_text(path: tuple[str, int] | None) -> str:
     return t("gui_mt_path_gpu", api={"vulkan": "Vulkan", "cuda": "CUDA"}.get(backend, backend))
 
 
+_NVIDIA_SEEN: list[bool] = []  # cache: nvidia-smi runs at most once per process
+
+
+def nvidia_seen(gpu_info=None, block: bool = True) -> bool:
+    """#1525: nvidia-smi reports an NVIDIA GPU (cached). CPU mode on such a machine must not say "no NVIDIA GPU".
+    block=False (Tk thread): never runs nvidia-smi; an unknown result reads as False (the GUI probes at start-up)."""
+    if gpu_info is not None:
+        return gpu_info()[0] is not None
+    if not _NVIDIA_SEEN and not block:
+        return False
+    if not _NVIDIA_SEEN:
+        from ..hwprobe import gpu_info as probe
+
+        try:
+            _NVIDIA_SEEN.append(probe()[0] is not None)
+        except Exception:  # noqa: BLE001 - no probe = say nothing about the GPU
+            _NVIDIA_SEEN.append(False)
+    return _NVIDIA_SEEN[0]
+
+
+def cpu_mode_text(gpu_seen: bool | None = None, block: bool = True) -> str:
+    """The "CPU mode" text: "no NVIDIA GPU" only when nvidia-smi found none, else "NVIDIA GPU found but not used"."""
+    from ..i18n import t
+
+    return t("gui_cpu_mode_gpu_unused" if (nvidia_seen(block=block) if gpu_seen is None else gpu_seen)
+             else "gui_cpu_mode")
+
+
 def cpu_mode_line(device: str, mt_ms: float | None = None, lang: str | None = None,
-                  path: tuple[str, int] | None = None) -> str | None:
+                  path: tuple[str, int] | None = None, block: bool = True) -> str | None:
     """#780: status text "CPU mode" (+ per-line MT ms) when running on the CPU, else None.
     path (#1198): (backend, threads) of the MT model, shown after the ms so the user sees CPU vs Vulkan."""
     from ..i18n import t
 
     if device != "cpu":
         return None
-    base = t("gui_cpu_mode")
+    base = cpu_mode_text(block=block)
     if mt_ms is None:
         return base
     where = mt_path_text(path)
@@ -607,12 +636,12 @@ def drop_cpu_mode_notice(notice: str, status: str) -> str:
     remove it from the orange notice (a whole line, or a " | ..." tail); other notice text stays."""
     from ..i18n import t
 
-    cpu = t("gui_cpu_mode")
-    if not notice or cpu not in (status or ""):
+    cpus = {t("gui_cpu_mode"), t("gui_cpu_mode_gpu_unused")}  # #1525: either wording
+    if not notice or not any(c in (status or "") for c in cpus):
         return notice
     keep = []
     for ln in notice.split(chr(10)):
-        parts = [p for p in ln.split(" | ") if p.strip() != cpu]
+        parts = [p for p in ln.split(" | ") if p.strip() not in cpus]
         if parts:
             keep.append(" | ".join(parts))
     return chr(10).join(keep).strip()
@@ -914,6 +943,7 @@ def run_pack_download(pack: str, put, mdir=None, popen=None, bundled: bool | Non
     import subprocess
 
     popen = popen or subprocess.Popen
+    p = None
     try:
         p = popen(cmd or pack_download_cmd(pack, mdir, bundled), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                   env=download_env(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -928,6 +958,11 @@ def run_pack_download(pack: str, put, mdir=None, popen=None, bundled: bool | Non
     except Exception as e:  # noqa: BLE001
         put(("pack_line", f"{type(e).__name__}: {e}"[:90]))
         rc = -1
+        if p is not None:  # #1525: never return while the child may still write (callers release their lock here);
+            try:  # let it finish rather than kill it mid-swap (a kill between the two renames loses the old pack)
+                p.wait()
+            except Exception:  # noqa: BLE001
+                _diag.swallowed(__name__)
     put(("pack_done", pack, rc))
     return rc
 

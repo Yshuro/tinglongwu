@@ -33,6 +33,14 @@ except ImportError:  # pragma: no cover
 
 POLL_MS = 50
 UPDATE_CHECK_DELAY_MS = 5000
+def _mtime(p):
+    """#1525: identity of the installed GPU pack folder (a replacement gets a new mtime); None when absent."""
+    try:
+        return p.stat().st_mtime_ns if p is not None else None
+    except OSError:
+        return None
+
+
 UPDATE_LINE_WRAP_PX = 200  # #455: text + two buttons stay inside the 420 px main window
 # #886: Advanced settings sit in two label + control columns (grid columns 0-2 and 4-6, 3 is a gap), so the panel
 # with Advanced open fits a 1366x768 screen; long labels wrap instead of widening the panel
@@ -433,6 +441,7 @@ class App:
         self._build_quick()
         self._build_bar()
         self._build_update_line()
+        self._build_gpu_offer()  # #1525: one-click GPU speed-up pack offer (NVIDIA only)
         self.build_menubar()
         self.overlay = Overlay(self.root, self)
         self._sync_bar()  # #1042: the bar is not on screen before Start
@@ -1342,6 +1351,117 @@ class App:
         self.upd_no = ttk.Button(u, command=self._update_later, style="Bar.TButton", width=0)
         self.upd_yes = ttk.Button(u, command=self._update_yes, style="Bar.TButton", width=0)
         self.upd_apply_when_ready = False
+
+    # -- #1525: GPU speed-up pack offer ---------------------------------------------------------------
+    def _build_gpu_offer(self):
+        """One non-blocking line: "NVIDIA GPU found - install speed-up pack? [Install] [Not now] [Don't ask again]".
+        Hidden unless gpu_offer.should_offer; nvidia-smi runs on a thread, never on the Tk thread."""
+        from . import gpu_offer
+
+        self.gpu_busy = False
+        self.gpu_lines: list[str] = []
+        g = self.gpu_frame = ttk.Frame(self.root, padding=(4, 0, 4, 2))
+        self.v_gpu = tk.StringVar()
+        ttk.Label(g, textvariable=self.v_gpu, wraplength=UPDATE_LINE_WRAP_PX).pack(side="left")
+        self.gpu_bar = ttk.Progressbar(g, mode="indeterminate", length=80)
+        self.gpu_btns = [self._tx(ttk.Button(g, command=c, style="Bar.TButton", width=0), k) for k, c in
+                         (("gpu_offer_never", self._gpu_never), ("gpu_offer_later", self._gpu_hide),
+                          ("gpu_offer_install", self._gpu_install))]
+        probe = not gpu_offer.offline() and not gpu_offer.cpu_mode()
+
+        def work():  # nvidia-smi once, off the Tk thread; also fills the CPU-mode wording cache (core.nvidia_seen)
+            from .core import nvidia_seen
+
+            nvidia_seen()
+            if probe:
+                self.q.put(("gpu_state", self._gpu_detect()))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _gpu_detect() -> str:
+        from . import gpu_offer
+
+        try:
+            return gpu_offer.detect()
+        except Exception:  # noqa: BLE001 - no probe: no banner
+            return gpu_offer.UNAVAILABLE
+
+    def _gpu_show(self, text: str, buttons: bool, busy: bool = False):
+        self.v_gpu.set(text)
+        for b in self.gpu_btns:
+            b.pack_forget()
+        if buttons:
+            for b in self.gpu_btns:
+                b.pack(side="right", padx=(4, 0))
+        if busy:
+            self.gpu_bar.pack(side="right", padx=(4, 0))
+            self.gpu_bar.start(15)
+        else:
+            self.gpu_bar.stop()
+            self.gpu_bar.pack_forget()
+        if not self.gpu_frame.winfo_ismapped():
+            self.gpu_frame.pack(fill="x")
+
+    def _gpu_hide(self):
+        self.gpu_bar.stop()
+        self.gpu_frame.pack_forget()
+
+    def _gpu_offer_show(self):
+        from . import gpu_offer
+
+        self._gpu_show(t("gpu_offer_banner", size=gpu_offer.GPU_PACK_SIZE), buttons=True)
+
+    def _gpu_never(self):
+        from . import gpu_offer
+
+        self.settings[gpu_offer.DISMISS_KEY] = True
+        save_settings(self.settings)
+        self._gpu_hide()
+
+    def _gpu_install(self):
+        from . import gpu_offer
+        from .core import run_pack_download
+
+        if self.gpu_busy or gpu_offer.INSTALLING.is_set() or gpu_offer.offline():
+            return
+        from ..gpu_pack import pack_dir
+
+        pack = pack_dir()
+        failed_at = getattr(self, "gpu_runtime_failed_mtime", None)  # pack replaced since the failure -> trust it
+        if (pack is not None and (not getattr(self, "gpu_runtime_failed", False) or failed_at != _mtime(pack))
+                and gpu_offer._pack_usable(pack)):  # installed meanwhile (e.g. Add-ons); not after a CUDA load failure
+            self._gpu_show(t("gpu_offer_ok"), buttons=False)
+            return
+        gpu_offer.INSTALLING.set()
+        self.gpu_busy, self.gpu_lines = True, []
+        self._gpu_show(t("gpu_offer_running", size=gpu_offer.GPU_PACK_SIZE), buttons=False, busy=True)
+        put = lambda ev: self.q.put(("gpu_" + ev[0], *ev[1:]))  # noqa: E731 - not the language-pack events
+        try:
+            threading.Thread(target=gpu_offer.run_install, args=(run_pack_download, put),
+                             kwargs={"cmd": gpu_offer.gpu_pack_cmd()}, daemon=True).start()
+        except RuntimeError:  # no thread: release the lock and offer Install again
+            gpu_offer.INSTALLING.clear()
+            self.gpu_busy = False
+            self._gpu_offer_show()
+
+    def _gpu_event(self, ev):
+        from . import gpu_offer
+
+        kind = ev[0]
+        if kind == "gpu_state":
+            if not self.gpu_busy and gpu_offer.should_offer(ev[1], gpu_offer.cpu_mode(), bool(self.settings.get(gpu_offer.DISMISS_KEY)),
+                                      gpu_offer.offline()):
+                self._gpu_offer_show()
+        elif kind == "gpu_pack_line":
+            self.gpu_lines = [*self.gpu_lines[-20:], ev[1]]
+        elif kind == "gpu_pack_done":
+            self.gpu_busy = False
+            if gpu_offer.install_ok(ev[2], self.gpu_lines):
+                self.gpu_runtime_failed = False  # a fresh pack replaced the one that failed to load
+                self._gpu_show(t("gpu_offer_ok"), buttons=False)
+            else:
+                self._gpu_show(t("gpu_offer_fail", reason=gpu_offer.fail_reason(self.gpu_lines)), buttons=False)
 
     def _upd_show(self, key: str, buttons: tuple[str, str] | None = None, **kw):
         self.upd_msg = (key, kw, buttons)
@@ -2586,7 +2706,7 @@ class App:
                     from .core import cpu_mode_line
 
                     if self.load_t0 is None and not self.errored:
-                        text = cpu_mode_line("cpu", ev[1], path=ev[2] if len(ev) > 2 else None) or ""
+                        text = cpu_mode_line("cpu", ev[1], path=ev[2] if len(ev) > 2 else None, block=False) or ""
                         wait = self._wait_line()  # #1253: a held-translation / backlog note stays visible
                         if wait and text and getattr(self, "_pre_backlog", None) is not None:
                             self._pre_backlog = text  # shown again (alone) once nothing waits any more
@@ -2595,6 +2715,16 @@ class App:
                 elif kind == "notice" and ev[1] == SILENT_CLEAR:  # listened sound is back
                     self.v_notice.set(strip_silent_hint(self.v_notice.get()))
                 elif kind == "notice":
+                    from . import gpu_offer
+
+                    if gpu_offer.is_missing_pack_notice(ev[1]):
+                        self.gpu_runtime_failed = True  # the runtime could not load CUDA: Install must really repair
+                        from ..gpu_pack import pack_dir
+
+                        self.gpu_runtime_failed_mtime = _mtime(pack_dir())
+                    if (gpu_offer.is_missing_pack_notice(ev[1]) and not gpu_offer.offline() and not self.gpu_busy
+                            and not self.settings.get(gpu_offer.DISMISS_KEY)):
+                        self._gpu_offer_show()  # #1525: the "GPU pack missing" line gets its [Install] button
                     if ev[1] not in self.v_notice.get():  # the repeated silent hint must not clobber other lines
                         self.v_notice.set(ev[1])
                         self._dedupe_notice()  # #1241
@@ -2602,6 +2732,8 @@ class App:
                         self._show_panel()
                 elif kind == "topics":  # #611
                     self.render_topics(show=bool(self.topic_panel.entries()))
+                elif kind.startswith("gpu_"):  # #1525
+                    self._gpu_event(ev)
                 elif kind == "pack_line":
                     self._dl_event(ev)
                     self._status_text(ev[1])
