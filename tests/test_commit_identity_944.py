@@ -35,7 +35,6 @@ def test_placeholder_identity_fails_and_names_the_commit(tmp_path):
 
 @pytest.mark.parametrize("ident,committer", [
     (OWNER, None),
-    (("sunososobro-hub", "sunososobro@gmail.com"), ("GitHub", "noreply@github.com")),  # web-flow merge
     (("Claude", "noreply@anthropic.com"), None),
     (("tlwu", "noreply@anthropic.com"), None),
     (("github-actions[bot]", "41898282+github-actions[bot]@users.noreply.github.com"), None),
@@ -94,3 +93,51 @@ def test_step_runs_only_for_prs_into_dev_and_passes_the_commit_count():
     assert "github.base_ref == 'dev'" in cond and "github.event_name == 'pull_request'" in cond
     assert s["env"]["PR_COMMITS"] == "${{ github.event.pull_request.commits }}"
     assert '--expected-count "$PR_COMMITS"' in s["run"]
+
+
+def linked(c, login, role="author"):
+    """Attach the GitHub account the API resolved for this commit's author / committer email."""
+    c[role] = {"login": login, "id": 777}
+    return c
+
+
+def test_pr_author_own_email_passes_1443(tmp_path):
+    """#1443: a contributor commits with their own identity; GitHub links that email to the PR author's account."""
+    mine = [linked(commit("e" * 40, ("Jerry", "jerry@example.com")), "Jerry-Tseng", "author")]
+    mine[0]["committer"] = {"login": "Jerry-Tseng", "id": 777}
+    assert run(tmp_path, mine, "--author-login", "jerry-tseng", "--author-id", "777").returncode == 0
+    # the same email is not allowed for another PR author, nor when GitHub did not link it to the PR author
+    assert run(tmp_path, mine, "--author-login", "bob", "--author-id", "556").returncode == 1
+    unlinked = [commit("f" * 40, ("Jerry", "jerry@example.com"))]
+    assert run(tmp_path, unlinked, "--author-login", "jerry-tseng", "--author-id", "777").returncode == 1
+
+
+def test_pr_author_email_allowed_as_co_author_but_strangers_still_fail_1443(tmp_path):
+    msg = "fix\n\nCo-authored-by: Jerry <jerry@example.com>\nCo-authored-by: x <x@x>\n"
+    c = linked(commit("1" * 40, ("Jerry", "jerry@example.com"), message=msg), "Jerry-Tseng")
+    c["committer"] = {"login": "Jerry-Tseng", "id": 777}
+    r = run(tmp_path, [c], "--author-login", "Jerry-Tseng", "--author-id", "777")
+    assert r.returncode == 1
+    assert "<x@x>" in r.stdout and "jerry@example.com" not in r.stdout
+
+
+def test_owner_personal_email_is_not_in_the_public_allow_list():
+    # #1443: the owner's account is matched by login, never by a listed personal email.
+    assert not any(e.endswith(("@gmail.com", "@outlook.com", "@yahoo.com")) for e in ci.ALLOWED_EMAILS)
+
+
+def test_owner_web_flow_commit_passes_by_linked_login_on_any_pr(tmp_path):
+    # A squash merge on dev (owner's verified email, linked to the owner login) carried by a bot-opened back-merge PR.
+    c = commit("e" * 40, ("sunososobro-hub", "owner-private@example.com"), ("GitHub", "noreply@github.com"))
+    c["author"] = {"login": "sunososobro-hub"}
+    assert run(tmp_path, [c], "--author-login", "github-actions[bot]").returncode == 0
+    del c["author"]  # same email without the account link: unknown
+    assert run(tmp_path, [c], "--author-login", "github-actions[bot]").returncode == 1
+
+
+def test_failure_hint_points_to_the_contributors_own_noreply_not_the_owner(tmp_path):
+    r = run(tmp_path, [commit("f" * 40, ("x", "x@x"))], "--author-login", "ann", "--author-id", "555")
+    assert r.returncode == 1
+    hint = r.stdout.split("Set ", 1)[1]
+    assert "users.noreply.github.com" in hint and "your own" in hint.lower()
+    assert "sunososobro" not in hint
