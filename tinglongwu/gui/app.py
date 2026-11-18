@@ -19,7 +19,7 @@ from .icon import apply_icon, icon_path, set_app_id
 from ..langs import from_label as lang_from_label, label as lang_label, labels as lang_labels
 from ..i18n import SILENT_CLEAR
 from .core import scene_of as scene_mode_name
-from .core import (SpeakerColors, SPK_AVATAR_FG, speaker_initial, speaker_text, SCENES, WATCH_MODE, scene_mode, scene_runs, strip_silent_hint, GUI_SEND_MODES, BOTH_MODE, SPEAK_MARK, SpeakQueueSink, start_button, cpu_ram_gb, choice_label, choice_labels, choice_value, SPEAK_HINT_CABLE, meeting_cable, quick_settings, SameLanguageError, SEND_MODES, send_mode_notice_key, restart_needed, send_gate_line, speak_route, speak_start_view, tour_on_start, USAGE_CHOICES, usage_answer, usage_should_ask, tour_text, ALPHA_STEP, FONT_MAX, FONT_MIN, ROWS_MAX, ROWS_MIN, HISTORY_LINES, PRESETS, QUALITIES, SOURCES, TARGETS, QueueDraftRenderer,
+from .core import (SpeakerColors, SPK_AVATAR_FG, speaker_initial, speaker_text, SCENES, WATCH_MODE, scene_mode, scene_runs, source_label_key, toggled_source, strip_silent_hint, GUI_SEND_MODES, BOTH_MODE, SPEAK_MARK, SpeakQueueSink, start_button, cpu_ram_gb, choice_label, choice_labels, choice_value, SPEAK_HINT_CABLE, meeting_cable, quick_settings, SameLanguageError, SEND_MODES, send_mode_notice_key, restart_needed, send_gate_line, speak_route, speak_start_view, tour_on_start, USAGE_CHOICES, usage_answer, usage_should_ask, tour_text, ALPHA_STEP, FONT_MAX, FONT_MIN, ROWS_MAX, ROWS_MIN, HISTORY_LINES, PRESETS, QUALITIES, SOURCES, TARGETS, QueueDraftRenderer,
                    QueueSink, SubtitleState, engine_from_label, engine_labels, clamp_font, clamp_rows, follow_newest, load_settings,
                    combo_width, doctor_lang, is_downloaded, label_for_model, model_from_label, model_labels, rows_after_drag, run_download, run_setup_check, missing_start_model, StartDownload, quality_hint, quality_speech_model,
                    save_settings, settings_to_argv, topics_on, topics_model_path, voice_outputs, listen_outputs, mic_inputs, clamp_alpha, run_pack_download, gui_error_text, load_status_text)
@@ -601,6 +601,7 @@ class App:
         if getattr(self, "scene_combo", None) is not None:  # the dropdown shows names in the new UI language
             self.scene_combo.configure(values=self._scene_labels())
             self.scene_combo.set(t("gui_scene_" + self.v_scene.get()))
+            self._source_sync()  # #1544
         self.combos["lang"].configure(values=lang_labels())
         self._relabel_combos()
         self.home_lang.configure(values=lang_labels())
@@ -935,6 +936,10 @@ class App:
         self.scene_combo.set(t("gui_scene_" + self.v_scene.get()))
         self.scene_combo.pack(side="left")
         self.scene_combo.bind("<<ComboboxSelected>>", lambda _e: self._scene_changed())
+        # #1544: what the video scene listens to, in plain words, one click to switch (was only under 調整)
+        self.source_row = ttk.Frame(b)  # its own row: next to the scene dropdown it pushed the bar past its max width
+        self.btn_source = ttk.Button(self.source_row, command=self._source_toggled)
+        self.btn_source.pack(side="left")
         self.toggle_row = row1 = ttk.Frame(b)
         self.v_mic = tk.BooleanVar(value=True)
         self.btn_mic = ttk.Checkbutton(row1, variable=self.v_mic, style="Toolbutton", command=self._mic_toggled)
@@ -974,15 +979,43 @@ class App:
         if wide:
             self.scene_row.grid(row=0, column=0, columnspan=1, sticky="w", pady=0, padx=(0, 24))
             self.toggle_row.grid(row=0, column=1, columnspan=1, sticky="w", pady=0)
-            self.action_row.grid(row=1, column=0, columnspan=2, sticky="we", pady=(8, 0))
+            self.source_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            self.action_row.grid(row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
         else:
             self.scene_row.grid(row=0, column=0, columnspan=2, sticky="we", pady=(0, 6), padx=0)
             self.toggle_row.grid(row=1, column=0, columnspan=2, sticky="we", pady=0)
-            self.action_row.grid(row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
+            self.source_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            self.action_row.grid(row=3, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        self._source_sync()  # #1544: the grid() above would show the row again in the meeting scene
 
     @staticmethod
     def _scene_labels():
         return [t("gui_scene_" + sc) for sc in SCENES]
+
+    def _live_source_settings(self) -> dict:
+        """#1544: the settings with the Source as the Advanced box currently shows it (v_source is the live value;
+        collect() copies it back into settings at Start, so the button and the box must read / write the same one)."""
+        v = getattr(self, "v_source", None)
+        return dict(self.settings, source=v.get()) if v is not None else self.settings
+
+    def _source_sync(self):
+        """#1544: show / hide the source toggle for the saved scene and refresh its words."""
+        key = source_label_key(self._live_source_settings())
+        if key is None:
+            self.source_row.grid_remove()
+            return
+        self.btn_source.configure(text=t(key))
+        if self.source_row.grid_info() == {} and self.bar_wide is not None:
+            self.source_row.grid()
+
+    def _source_toggled(self):
+        """#1544: one click switches PC sound <-> microphone (applies at the next Start)."""
+        new = toggled_source(self._live_source_settings())
+        self.settings["source"] = new
+        if getattr(self, "v_source", None) is not None:
+            self.v_source.set(new)  # the Advanced box follows; Start reads this value (collect)
+        save_settings(self.settings)
+        self._source_sync()
 
     def _scene_changed(self):
         """0.3.8: remember the scene picked in the dropdown (applies at the next Start; disabled while running)."""
@@ -992,6 +1025,7 @@ class App:
         self.v_scene.set(SCENES[idx])
         self.settings["scene"] = SCENES[idx]
         save_settings(self.settings)
+        self._source_sync()
 
     def _spk_toggled(self):
         """0.3.8: 標示說話者. On + pack missing -> ask, download in a worker thread (Tk never blocks); the labels start
@@ -1267,6 +1301,7 @@ class App:
         self.v_quality.trace_add("write", lambda *_: self._quality_changed())
         self._quality_changed()
         self.v_source = self._combo(4, "gui_source", "source", SOURCES, "source")
+        self.v_source.trace_add("write", lambda *_: self._source_sync())  # #1544: the video button follows the box
         self._build_send_mode(g_mine).pack(anchor="w", fill="x")
         self.v_preset = self._combo(5, "gui_mode", "preset", PRESETS, "preset")
         self._label(6, "gui_glossary")
@@ -1767,6 +1802,10 @@ class App:
         cb = getattr(self, "scene_combo", None)
         if cb is not None:
             cb.configure(state="readonly" if st == "normal" else "disabled")
+        bs = getattr(self, "btn_source", None)
+        if bs is not None:  # #1544: the source applies at the next Start too; follows a change made under 調整
+            self._source_sync()
+            bs.configure(state=st)
 
     def _sync_quick(self):
         """Label/enable the first-screen buttons for the current session state (#294)."""
