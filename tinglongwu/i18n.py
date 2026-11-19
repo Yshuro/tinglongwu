@@ -1050,7 +1050,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_mode_gpu": "GPU モード",
         "gui_mode_cpu": "CPU モード",
         "gui_copy_all": "すべてコピー",
-        "gui_cpu": "CPU {p}%",
+        "gui_cpu": "CPU 使用 {p}%",
         "gui_wrong_title": "誤訳",
         "gui_wrong_usage": "次も含める: {text}（TingLong の主な使い道）",
         "gui_wrong_ask": "このテキストが GitHub の issue フォームに入力されます（アプリからは何も送信されません。そこで編集できます）:\n\n{text}",
