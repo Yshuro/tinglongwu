@@ -10,8 +10,9 @@ import os
 import sys
 import time
 from pathlib import Path
+from .paths import DATA_DIR
 
-DATA = Path(__file__).resolve().parent / "data" / "splash_frames.json.gz"
+DATA = DATA_DIR / "splash_frames.json.gz"
 
 
 def load_frames(path: Path = DATA) -> dict:

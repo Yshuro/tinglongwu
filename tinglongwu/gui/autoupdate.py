@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path, PureWindowsPath
+from ..paths import APP_ROOT
 
 from .. import userdirs
 
@@ -52,7 +53,7 @@ def app_root() -> Path:
     Source install: tinglongwu/ sits directly under it (editable install of the bundled source)."""
     if is_bundled():
         return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parents[2]
+    return APP_ROOT
 
 
 def is_wizard_install(root: Path | None = None, platform: str | None = None) -> bool:
