@@ -2532,6 +2532,8 @@ class App:
             self.topics_lang.pack(side="top", fill="x", padx=8)
             self.topics_hint = ttk.Label(w, wraplength=DOCK_W - 30, justify="left", foreground="#7f8c8d")
             self.topics_hint.pack(side="top", fill="x", padx=8)
+            self.topics_busy = ttk.Label(w, foreground="#2e86de")  # the model can take a minute: show it is working
+            self.topics_busy.pack(side="top", fill="x", padx=8)
             self.topics_text = tk.Text(w, wrap="word", height=20, borderwidth=0, padx=8, pady=6)
             self.topics_text.tag_configure("title", font=("TkDefaultFont", 12, "bold"))
             self.topics_text.tag_configure("when", foreground="#7f8c8d")
@@ -2564,9 +2566,28 @@ class App:
                 tx.insert("end", f"\u2192 {a}\n")
             tx.insert("end", "\n")
         tx.configure(state="disabled")
+        self._topics_busy_tick()
         if show and not self._topics_closed:
             w.deiconify()
             w.lift()
+
+    _topics_busy_job = None
+
+    def _topics_busy_tick(self):
+        """Label 'Summarizing... N s' while the model runs a topic; refreshes every second, leaves the text alone."""
+        if self._topics_busy_job is not None:
+            try:
+                self.root.after_cancel(self._topics_busy_job)
+            except Exception:  # noqa: BLE001
+                pass
+            self._topics_busy_job = None
+        w = self.topics_win
+        if w is None or not w.winfo_exists():
+            return
+        secs = self.topic_panel.busy_for()
+        self.topics_busy.configure(text="" if secs is None else t("gui_topics_busy", s=int(secs)))
+        if secs is not None:
+            self._topics_busy_job = self.root.after(1000, self._topics_busy_tick)
 
     _topics_closed = False
 
@@ -2886,7 +2907,7 @@ class App:
                         backlog_line=lambda n: q.put(("backlog", n, leg)),  # #1259
                         mt_wait_line=lambda n: q.put(("mtwait", n, leg)),  # #1253; per leg, both legs may hold
                         labeler_factory=self._make_labeler if sink_cls is None and s.get("source") == "system" else None,
-                        on_topic=self.topic_panel.add if sink_cls is None else None)  # #611
+                        on_topic=self.topic_panel if sink_cls is None else None)  # #611
         except (Exception, SystemExit) as e:  # noqa: BLE001  # #1351: a CLI SystemExit must not stop the GUI silently
             print(f"tlwu: {type(e).__name__}: {e}", file=sys.stderr, flush=True)  # raw text for the log
             q.put(("error", gui_error_text(e)))  # #885: localized, no CLI flags

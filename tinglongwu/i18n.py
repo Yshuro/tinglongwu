@@ -27,6 +27,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_topics_downloading": "Downloading the notes model (about {mb} MB, once). Works offline afterwards.",  # #1379
         "gui_topics_cancel": "Cancel download",  # #1379
         "gui_topics_empty": "Each finished topic shows up here during the meeting.",  # #611
+        "gui_topics_busy": "Summarizing the latest topic... {s} s",
         "rec_label": "● Recording",
         "rec_consent": "Recording is on: audio is saved on this computer only ({path}). Get the other side's consent before recording their voice.",
         "guard_blocked": "\U0001F6E1 tlwu blocked an outgoing connection: {host}:{port} ({pkg}). "
@@ -297,6 +298,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_topics_downloading": "Загрузка модели заметок (около {mb} МБ, один раз). Потом работает офлайн.",  # #1379
         "gui_topics_cancel": "Отменить загрузку",  # #1379
         "gui_topics_empty": "Каждая завершённая тема появится здесь во время встречи.",  # #611
+        "gui_topics_busy": "Подводим итог последней темы... {s} с",
         "rec_label": "● Запись",
         "rec_consent": "Запись включена: звук сохраняется только на этом компьютере ({path}). Перед записью голоса собеседника получите его согласие.",
         "guard_blocked": "\U0001F6E1 tlwu заблокировал исходящее соединение: {host}:{port} ({pkg}). "
@@ -567,6 +569,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_topics_downloading": "正在下載重點模型（約 {mb} MB，只需一次）。之後可離線使用。",  # #1379
         "gui_topics_cancel": "取消下載",  # #1379
         "gui_topics_empty": "會議中每講完一個主題，就會出現在這裡。",  # #611
+        "gui_topics_busy": "正在整理最新一段重點… 已 {s} 秒",
         "rec_label": "● 錄音中",
         "rec_consent": "錄音已開啟：聲音只存在這台電腦（{path}）。錄下對方的聲音前，請先取得對方同意。",
         "guard_blocked": "\U0001F6E1 已擋下 tlwu 對外連線：{host}:{port}（{pkg}）。"
@@ -837,6 +840,7 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_topics_downloading": "メモ用モデルをダウンロード中（約 {mb} MB、初回のみ）。その後はオフラインで使えます。",  # #1379
         "gui_topics_cancel": "ダウンロードを中止",  # #1379
         "gui_topics_empty": "会議中、話し終えたトピックがここに表示されます。",  # #611
+        "gui_topics_busy": "最新のトピックを要約中... {s} 秒",
         "rec_label": "● 録音中",
         "rec_consent": "録音中です。音声はこのコンピューターにだけ保存されます（{path}）。相手の声を録音する前に同意を得てください。",
         "guard_blocked": "\U0001F6E1 tlwu が外部への接続をブロックしました: {host}:{port} ({pkg})。"

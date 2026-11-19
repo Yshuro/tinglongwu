@@ -162,7 +162,7 @@ def test_listen_leg_passes_the_panel_to_run_session(tmp_path, monkeypatch):
         got = {}
         monkeypatch.setattr(cli, "run_session", lambda args, **kw: got.update(kw))
         a._run_leg(dict(DEFAULTS), threading.Event())
-        assert got["on_topic"] == a.topic_panel.add
+        assert got["on_topic"] == a.topic_panel
         got.clear()
         a._run_leg(dict(DEFAULTS), threading.Event(), sink_cls=lambda q: type("S", (), {})())
         assert got["on_topic"] is None  # the speak leg never feeds the panel
