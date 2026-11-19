@@ -33,6 +33,23 @@ except ImportError:  # pragma: no cover
 
 POLL_MS = 50
 UPDATE_CHECK_DELAY_MS = 5000
+def set_titlebar_dark(win, dark: bool) -> bool:
+    """#1662: dark (or light) OS title bar via DWMWA_USE_IMMERSIVE_DARK_MODE on the Toplevel's real HWND; Windows only."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+        val = ctypes.c_int(1 if dark else 0)
+        for attr in (20, 19):  # 19 on older Win10 builds
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val)) == 0:
+                return True
+    except Exception:  # noqa: BLE001
+        _diag.swallowed(__name__)
+    return False
+
+
 def _mtime(p):
     """#1525: identity of the installed GPU pack folder (a replacement gets a new mtime); None when absent."""
     try:
@@ -58,16 +75,23 @@ FONT_MENU_SIZES = tuple(range(FONT_MIN, FONT_MAX + 1, 4))  # #738: Settings > Fo
 UI_LANGS = {"繁體中文": "zh-TW", "English": "en", "Русский": "ru", "日本語": "ja"}
 STATUS_WRAP_MIN_PX = 200  # #1241: status / notice wrap at the panel width, never narrower than this
 BAR_WIDE_PX = 1200  # #1241: from this bar width the 情境 dropdown and the toggles share one row
+FONT_INLINE_PX = 500  # chat toolbar: font controls share the row from this width
 BAR_ONE_ROW_PX = 1200  # the whole bottom bar (情境, toggles, Adjust / Freeze / Start) on one row from this width
 MAIN_W, MAIN_H, MAIN_MIN_W, MAIN_MIN_H = 460, 640, 380, 480  # #1028: the chat-style main window
 # chat bubbles (#1028): other side on the left, me on the right; (bubble background, text) per theme
 # #1644: "latest" = the newest finished line from the other side (brighter, so the eye lands on it first)
-BUBBLE = {"dark": {"bg": "#151824", "other": ("#1c2030", "#e3e6ee"), "me": ("#3f5fe0", "#ffffff"),
-                   "latest": ("#2a3560", "#ffffff"), "sub": "#8d95a8", "head": "#8d95a8"},
+# #1662 Linear-style palette: window / transcript backgrounds differ slightly, 1 px separators, muted secondary text,
+# bright primary text and ONE accent (the existing blue); warn / err are the only other colours
+PAL = {"dark": {"win": "#14161c", "bg": "#0e1015", "sep": "#262a34", "fg": "#e6e8ee", "muted": "#8a90a0",
+                "accent": "#3f5fe0", "warn": "#d29b3c", "err": "#e5534b"},
+       "light": {"win": "#f6f7fa", "bg": "#ffffff", "sep": "#dfe2ea", "fg": "#1d2447", "muted": "#5b6390",
+                 "accent": "#3f5fe0", "warn": "#b35a00", "err": "#c0392b"}}
+BUBBLE = {"dark": {"bg": "#0e1015", "other": ("#1a1d27", "#e6e8ee"), "me": ("#3f5fe0", "#ffffff"),
+                   "latest": ("#2a3560", "#ffffff"), "sub": "#8a90a0", "head": "#8a90a0"},
           "light": {"bg": "#ffffff", "other": ("#e6e9f5", "#1d2447"), "me": ("#cfe0ff", "#10224d"),
                     "latest": ("#cdd6ff", "#10224d"), "sub": "#5b6390", "head": "#5b6390"}}
 # #1644: notes (重點整理) window per theme: time range muted, bullets in the notes accent (violet)
-NOTES = {"dark": {"bg": "#151824", "fg": "#e3e6ee", "title": "#ffffff", "when": "#8d95a8", "mark": "#b79cff"},
+NOTES = {"dark": {"bg": "#0e1015", "fg": "#e6e8ee", "title": "#ffffff", "when": "#8a90a0", "mark": "#b79cff"},
          "light": {"bg": "#ffffff", "fg": "#1d2447", "title": "#10224d", "when": "#5b6390", "mark": "#6b4fd8"}}
 FG_FINAL, FG_DRAFT, FG_SRC, BG = "#ffffff", "#8a8a8a", "#b8c4d6", "#101010"
 FONT_FAMILY = "Microsoft JhengHei UI" if sys.platform == "win32" else "TkDefaultFont"
@@ -619,6 +643,29 @@ class App:
             if int(str(lbl.cget("wraplength") or 0)) != wl:
                 lbl.configure(wraplength=wl)
 
+    @property
+    def pal(self) -> dict:
+        return PAL["light" if self.settings.get("theme") == "light" else "dark"]
+
+    def _tok(self, w, token: str):
+        """#1662: a label whose colour is a palette token (re-tinted on every theme change)."""
+        self._tok_widgets = [(x, k) for x, k in getattr(self, "_tok_widgets", []) if x.winfo_exists()]
+        self._tok_widgets.append((w, token))
+        w.configure(foreground=self.pal[token])
+        return w
+
+    def _style_menu(self, m):
+        pal = self.pal
+        try:
+            m.configure(bg=pal["win"], fg=pal["fg"], activebackground=pal["accent"], activeforeground="#ffffff",
+                        selectcolor=pal["fg"], bd=0, relief="flat", activeborderwidth=0)
+            end = m.index("end")
+            for i in range(0 if end is None else end + 1):
+                if m.type(i) == "cascade":
+                    self._style_menu(m.nametowidget(m.entrycget(i, "menu")))
+        except tk.TclError:
+            _diag.swallowed(__name__)
+
     def apply_theme(self, name: str):
         self.settings["theme"] = name = "light" if name == "light" else "dark"
         if sv_ttk is not None:
@@ -631,6 +678,12 @@ class App:
         for style in ("Bar.TButton", "Bar.Toolbutton"):
             st.configure(style, padding=(4, 1))
         st.configure("Adv.Toolbutton", anchor="w", padding=(8, 2))
+        pal = self.pal  # #1662: one palette; ttk frames / labels take the window colours, secondary text is muted
+        for style in ("TFrame", "TLabel", "TCheckbutton", "TRadiobutton", "Toolbutton"):
+            st.configure(style, background=pal["win"])
+        st.configure("TLabel", foreground=pal["fg"])
+        st.configure("Menu.TMenubutton", padding=(8, 0), background=pal["win"], foreground=pal["fg"])
+        st.configure("Card.TFrame", background=pal["win"])
         st.configure("Start.Accent.TButton", font=(FONT_FAMILY, 13, "bold"), padding=(14, 8))  # #1028: the big Start
         self._retint()
         if sv_ttk is not None and not getattr(self, "_retint_bound", False):
@@ -644,6 +697,32 @@ class App:
 
     def _retint(self):
         """Our own colours on the plain tk.Text widgets (chat log, notes window) for the current theme."""
+        pal = self.pal
+        for w, k in list(getattr(self, "_tok_widgets", [])):
+            try:
+                w.configure(foreground=pal[k])
+            except tk.TclError:
+                pass
+        try:
+            self.root.configure(bg=pal["win"])
+            self.panel.configure(bg=pal["win"])
+        except (tk.TclError, AttributeError):
+            pass
+        dark = self.settings.get("theme") != "light"
+        for name in ("root", "panel", "topics_win"):
+            w = getattr(self, name, None)
+            try:
+                if w is not None and w.winfo_exists():
+                    set_titlebar_dark(w, dark)
+            except tk.TclError:
+                pass
+        for name in ("menubar", "panel_menubar"):
+            if getattr(self, name, None) is not None:
+                self._style_menu(getattr(self, name))
+        for name in ("menu_sep", "panel_menubar_sep"):
+            w = getattr(self, name, None)
+            if w is not None and w.winfo_exists():
+                w.configure(bg=pal["sep"])
         if getattr(self, "log_text", None) is not None:
             self._chat_tags()
         if getattr(self, "topics_win", None) is not None and self.topics_win.winfo_exists():
@@ -759,6 +838,7 @@ class App:
         self._send_mode_changed()
         self.run_snapshot = None  # #983: the start-time values of the running session
         self.lbl_restart = ttk.Label(self.body, wraplength=300, justify="left", foreground="#b45309")
+        self._tok(self.lbl_restart, "warn")
         self.btn_restart = ttk.Button(self.body, command=self._restart_now)
         for name in ("v_lang", "v_target", "v_engine", "v_quality", "v_model", "v_preset", "v_gloss", "v_source",
                      "v_voice", "v_voice_dev", "v_gpu_use"):
@@ -821,7 +901,7 @@ class App:
                 if self.speak_hint == SPEAK_HINT_CABLE:
                     self._show_panel()
             self.btn_gate_send.configure(state="normal" if v.state == "asking" else "disabled")
-            self.lbl_gate.configure(foreground="gray" if v.state == "rejected" else "")  # #968: not sent
+            self.lbl_gate.configure(foreground=self.pal["muted"] if v.state == "rejected" else self.pal["fg"])  # #968: not sent
 
     def _start_values(self) -> dict:
         """#983: current raw values of the start-time settings (same getters at start and later, so they compare)."""
@@ -1051,13 +1131,13 @@ class App:
         """#1028: the main window = language pickers on top, chat bubbles in the middle, status + one big Start and
         the mic / floating-subtitle toggles at the bottom. (Settings are the separate panel, opened with the gear.)"""
         r = self.root
-        self.top_frame = ttk.Frame(r, padding=(12, 10, 12, 4))
+        self.top_frame = ttk.Frame(r, padding=(12, 6, 12, 2))
         self.top_frame.pack(side="top", fill="x")
-        self.bar = ttk.Frame(r, padding=(12, 4, 12, 10))
+        self.bar = ttk.Frame(r, padding=(12, 2, 12, 6))
         self.bar.pack(side="bottom", fill="x")
         self.status_holder = ttk.Frame(r, padding=(12, 0, 12, 0))
         self.status_holder.pack(side="bottom", fill="x")
-        self.chat_holder = ttk.Frame(r, padding=(8, 0, 8, 4))
+        self.chat_holder = ttk.Frame(r, padding=(8, 0, 8, 2))
         self.chat_holder.pack(side="top", fill="both", expand=True)
 
     def _build_bar(self):
@@ -1117,18 +1197,18 @@ class App:
         if one_row:
             self.scene_row.grid(row=0, column=0, columnspan=1, sticky="w", pady=0, padx=(0, 24))
             self.toggle_row.grid(row=0, column=1, columnspan=1, sticky="w", pady=0)
-            self.action_row.grid(row=0, column=2, columnspan=1, sticky="e", pady=0)
-            self.source_row.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        elif wide:
+            self.source_row.grid(row=0, column=2, columnspan=1, sticky="w", pady=0, padx=(12, 0))
+            self.action_row.grid(row=0, column=3, columnspan=1, sticky="e", pady=0)
+        elif wide:  # dense: source toggle shares a row with Adjust / Freeze / Start
             self.scene_row.grid(row=0, column=0, columnspan=1, sticky="w", pady=0, padx=(0, 24))
             self.toggle_row.grid(row=0, column=1, columnspan=1, sticky="w", pady=0)
-            self.source_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
-            self.action_row.grid(row=2, column=0, columnspan=2, sticky="we", pady=(8, 0))
+            self.source_row.grid(row=1, column=0, columnspan=1, sticky="w", pady=(4, 0))
+            self.action_row.grid(row=1, column=1, columnspan=1, sticky="e", pady=(4, 0))
         else:
-            self.scene_row.grid(row=0, column=0, columnspan=2, sticky="we", pady=(0, 6), padx=0)
+            self.scene_row.grid(row=0, column=0, columnspan=2, sticky="we", pady=(0, 3), padx=0)
             self.toggle_row.grid(row=1, column=0, columnspan=2, sticky="we", pady=0)
-            self.source_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
-            self.action_row.grid(row=3, column=0, columnspan=2, sticky="we", pady=(8, 0))
+            self.source_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(3, 0))
+            self.action_row.grid(row=3, column=0, columnspan=2, sticky="we", pady=(4, 0))
         self._source_sync()  # #1544: the grid() above would show the row again in the meeting scene
 
     @staticmethod
@@ -1337,6 +1417,10 @@ class App:
         """#982: My language == Other side language: inline error and Start disabled (home button and bar button)."""
         if getattr(self, "lang_err", None) is not None:
             self.lang_err.configure(text=t("gui_same_lang") if self.same_lang else "")
+            if self.same_lang:  # an empty error line is a ~20 px blank band, so it only takes space when it has text
+                self.lang_err.grid()
+            else:
+                self.lang_err.grid_remove()
         if hasattr(self, "btn"):
             self._sync_quick()
 
@@ -1399,23 +1483,23 @@ class App:
         p.resizable(True, True)  # #939: a normal resizable window; size and position are remembered
         p.protocol("WM_DELETE_WINDOW", p.withdraw)
         self._build_sidebar(p)
-        self.body = body = ttk.Frame(p, padding=(12, 6, 12, 6))
+        self.body = body = ttk.Frame(p, padding=(12, 3, 12, 3))
         body.pack(side="left", fill="both", expand=True)
         short = p.winfo_screenheight() < SHORT_SCREEN_PX  # #886: a 768 px screen has no height to spare
         self.settings_title = self._tx(ttk.Label(body, font=(FONT_FAMILY, 14, "bold")), "gui_menu_settings")
-        self.settings_title.pack(anchor="w", pady=(0, 2 if short else 6))
+        self.settings_title.pack(anchor="w", pady=(0, 2 if short else 4))
         card = "Card.TFrame" if sv_ttk is not None else "TFrame"
 
         def group(title_key):  # #1028: one plain-language group = a bold heading + its choices
             g = ttk.Frame(body, style=card, padding=(10, 3 if short else 5, 10, 3 if short else 5))
-            g.pack(fill="x", pady=(0, 4))
+            g.pack(fill="x", pady=(0, 3))
             self._tx(ttk.Label(g, font=(FONT_FAMILY, 11, "bold")), title_key).pack(anchor="w")
             return g
 
         g_speed, g_appear = group("gui_set_speed"), group("gui_set_appear")
         g_mine, g_rec = group("gui_set_mine"), group("gui_set_records")
         self.card_adv = ttk.Frame(body, style=card, padding=(ADV_PAD_X // 2, 4, ADV_PAD_X // 2, 4))  # the Advanced toggle + everything else
-        self.card_adv.pack(fill="x", pady=(2, 0))
+        self.card_adv.pack(fill="x", pady=(0, 0))
         self.frm = f = ttk.Frame(self.card_adv, padding=(0, 4, 0, 0))
         f.columnconfigure(3, minsize=14)  # #886: gap between the two setting columns
         for col in (1, 5):  # the two control columns share the card's width (the "..." buttons stay narrow)
@@ -1520,6 +1604,8 @@ class App:
         self.v_notice = tk.StringVar(value="")
         self.lbl_notice = ttk.Label(sb, textvariable=self.v_notice, wraplength=MAIN_W - 40, foreground="#b35a00",
                                     justify="left")
+        self._tok(self.lbl_notice, "warn")
+        self._tok(self.lbl_status, "muted")
         self.lbl_notice.pack(anchor="w", fill="x")
         sb.bind("<Configure>", lambda e: self._wrap_status(e.width), add="+")  # #1241
         self._build_send_gate(sb)  # #833: in the always-visible status box, not under the collapsed Advanced
@@ -1537,7 +1623,10 @@ class App:
         self.upd_msg: tuple | None = None  # (i18n key, format kwargs, button keys)
         u = self.upd_frame = ttk.Frame(self.root, padding=(4, 0, 4, 2))
         self.v_upd = tk.StringVar()
-        ttk.Label(u, textvariable=self.v_upd, wraplength=UPDATE_LINE_WRAP_PX).pack(side="left")
+        _l = ttk.Label(u, textvariable=self.v_upd, wraplength=UPDATE_LINE_WRAP_PX)
+        _l.pack(side="left")
+        # one line when the window is wide enough; wraps only as the width runs out (text + buttons ~ 300 px)
+        u.bind("<Configure>", lambda e, l=_l: l.configure(wraplength=max(UPDATE_LINE_WRAP_PX, e.width - 300)), add="+")
         self.upd_no = ttk.Button(u, command=self._update_later, style="Bar.TButton", width=0)
         self.upd_yes = ttk.Button(u, command=self._update_yes, style="Bar.TButton", width=0)
         self.upd_apply_when_ready = False
@@ -1552,7 +1641,10 @@ class App:
         self.gpu_lines: list[str] = []
         g = self.gpu_frame = ttk.Frame(self.root, padding=(4, 0, 4, 2))
         self.v_gpu = tk.StringVar()
-        ttk.Label(g, textvariable=self.v_gpu, wraplength=UPDATE_LINE_WRAP_PX).pack(side="left")
+        _l = ttk.Label(g, textvariable=self.v_gpu, wraplength=UPDATE_LINE_WRAP_PX)
+        _l.pack(side="left")
+        # one line when the window is wide enough; wraps only as the width runs out (text + buttons ~ 300 px)
+        g.bind("<Configure>", lambda e, l=_l: l.configure(wraplength=max(UPDATE_LINE_WRAP_PX, e.width - 300)), add="+")
         self.gpu_bar = ttk.Progressbar(g, mode="indeterminate", length=80)
         self.gpu_btns = [self._tx(ttk.Button(g, command=c, style="Bar.TButton", width=0), k) for k, c in
                          (("gpu_offer_never", self._gpu_never), ("gpu_offer_later", self._gpu_hide),
@@ -1836,10 +1928,30 @@ class App:
         hm.add_command(label=t("gui_menu_about"), command=self.show_about)
         mb.add_cascade(label=t("gui_menu_help"), menu=hm)
         old = getattr(self, attr, None)
-        win.configure(menu=mb)
+        self._menu_row(win, attr, mb)  # #1662: the native Windows menu bar cannot be themed -> an in-window row
         if old is not None:
             old.destroy()
         return mb
+
+    def _menu_row(self, win, attr, mb):
+        """#1662: File / Settings / Help as flat menubuttons in a dark row with a 1 px separator under it."""
+        row = getattr(self, attr + "_row", None)
+        sepname = "menu_sep" if win is self.root else attr + "_sep"
+        if row is None or not row.winfo_exists():
+            row = ttk.Frame(win, padding=(6, 0, 6, 0))
+            sep = tk.Frame(win, height=1, bd=0)
+            anchor = self.top_frame if win is self.root else self.settings_title
+            row.pack(side="top", fill="x", before=anchor)
+            sep.pack(side="top", fill="x", before=anchor)
+            setattr(self, attr + "_row", row)
+            setattr(self, sepname, sep)
+        for w in row.winfo_children():
+            w.destroy()
+        for i in range(mb.index("end") + 1):
+            ttk.Menubutton(row, text=mb.entrycget(i, "label"), style="Menu.TMenubutton",
+                           menu=mb.nametowidget(mb.entrycget(i, "menu"))).pack(side="left")
+        self._style_menu(mb)
+        getattr(self, sepname).configure(bg=self.pal["sep"])
 
     def _maybe_ask_usage(self):
         if usage_should_ask(self.settings) and getattr(self, "usage_win", None) is None:
@@ -1909,7 +2021,8 @@ class App:
         # #737: everything else sits under this toggle, collapsed by default (state remembered as advanced_open)
         self.adv_btn = ttk.Checkbutton(self.card_adv, variable=self.v_adv, style="Adv.Toolbutton", command=self._adv_toggled)
         self.adv_btn.pack(anchor="w", fill="x")
-        self.adv_hint = self._tx(ttk.Label(self.card_adv, wraplength=300, justify="left", foreground="gray"), "gui_set_adv")
+        self.adv_hint = self._tx(ttk.Label(self.card_adv, wraplength=300, justify="left"), "gui_set_adv")
+        self._tok(self.adv_hint, "muted")
         self.adv_hint.pack(anchor="w")
         self.set_advanced(bool(self.settings["advanced_open"]))
         # #737 / #1006: the pickers are my language (`target`) and the other side's language (= source language
@@ -1918,23 +2031,22 @@ class App:
         tgt = self.combos["target"]
         self._tx(ttk.Label(q), "gui_quick_target").grid(row=0, column=0, sticky="w")
         self.home_target = ttk.Combobox(q, textvariable=tgt.cget("textvariable"), values=tgt.cget("values"),
-                                        state="readonly", width=8)
-        self.home_target.grid(row=0, column=1, sticky="we", padx=(6, 14))
-        self._tx(ttk.Label(q), "gui_quick_other").grid(row=0, column=2, sticky="w")
-        self.home_lang = ttk.Combobox(q, textvariable=self.v_lang, values=lang_labels(), state="readonly", width=8)
-        self.home_lang.grid(row=0, column=3, sticky="we", padx=(6, 0))
-        q.columnconfigure(1, weight=1)
-        q.columnconfigure(3, weight=1)
+                                        state="readonly", width=7)
+        self.home_target.grid(row=0, column=1, sticky="w", padx=(4, 8), pady=(0, 2))
+        self._tx(ttk.Label(q), "gui_quick_other").grid(row=1, column=0, sticky="w")  # own row: never wider than the window
+        self.home_lang = ttk.Combobox(q, textvariable=self.v_lang, values=lang_labels(), state="readonly", width=7)
+        self.home_lang.grid(row=1, column=1, sticky="w", padx=(4, 8))
+        q.columnconfigure(4, weight=1)  # spare width goes to the right, the pickers stay grouped at the left
         self.v_pair = tk.StringVar()  # #981: "same language" is said at once, before Start
         # #982: the inline error (v_pair only carries the state text)
-        self.lang_err = ttk.Label(q, foreground="#c0392b", wraplength=MAIN_W - 40, justify="left")
-        self.lang_err.grid(row=1, column=0, columnspan=4, sticky="w")
+        self.lang_err = self._tok(ttk.Label(q, wraplength=MAIN_W - 40, justify="left"), "err")
+        self.lang_err.grid(row=2, column=0, columnspan=4, sticky="w")
         self.ru_notice = ttk.Frame(q)  # lasting "Russian voice not downloaded" line + [Download]
-        self.ru_notice_lbl = ttk.Label(self.ru_notice, foreground="#b9770e")
+        self.ru_notice_lbl = self._tok(ttk.Label(self.ru_notice), "warn")
         self.ru_notice_lbl.pack(side="left")
         self.ru_notice_btn = ttk.Button(self.ru_notice, command=self._ru_voice_ask)
         self.ru_notice_btn.pack(side="left", padx=(8, 0))
-        self.ru_notice.grid(row=2, column=0, columnspan=4, sticky="w")
+        self.ru_notice.grid(row=3, column=0, columnspan=4, sticky="w")
         self.ru_notice.grid_remove()
         for v in (self.v_lang, self.v_target):
             v.trace_add("write", lambda *_: self._pair_changed())
@@ -2004,7 +2116,7 @@ class App:
             gp = _nvml_gpu_percent() if self._gpu_ok else None
             if pct is not None:
                 txt = mode + "  " + t("gui_cpu", p=pct) + ("" if gp is None else "  GPU %d%%" % gp)
-                self.lbl_cpu.configure(text=txt, foreground="#c0392b" if max(pct, gp or 0) >= 85 else "")
+                self.lbl_cpu.configure(text=txt, foreground=self.pal["err"] if max(pct, gp or 0) >= 85 else self.pal["muted"])
             elif not self.lbl_cpu.cget("text"):
                 self.lbl_cpu.configure(text=mode)
             self.root.after(2000, self._cpu_poll)
@@ -2015,17 +2127,19 @@ class App:
         """The conversation in the main window (#1028): chat bubbles, other side on the left, me on the right, the
         original text small under each bubble; scrolling history, newest at the bottom (#72)."""
         self.v_bar = tk.BooleanVar(value=self.settings["floating_bar"])
-        bar = ttk.Frame(f)
+        bar = ttk.Frame(f)  # one dense toolbar: save / copy / topics at the left, font + A- A+ at the right
         bar.pack(side="top", fill="x")
-        ttk.Button(bar, text="A+", width=3, command=lambda: self.bump_log_font(2)).pack(side="right")
-        ttk.Button(bar, text="A-", width=3, command=lambda: self.bump_log_font(-2)).pack(side="right", padx=(0, 2))
+        fb = ttk.Frame(f)
+        self.font_box = fb
+        ttk.Button(fb, text="A+", width=3, command=lambda: self.bump_log_font(2)).pack(side="right")
+        ttk.Button(fb, text="A-", width=3, command=lambda: self.bump_log_font(-2)).pack(side="right", padx=(0, 2))
         try:  # every font the system has; "" = the program's default
             fams = sorted({f for f in tkfont.families(self.root) if not f.startswith("@")}, key=str.lower)
         except Exception:  # noqa: BLE001
             fams = []
         self._font_default = t("gui_font_default")
         self.v_family = tk.StringVar(value=self.settings.get("font_family") or self._font_default)
-        fcb = ttk.Combobox(bar, textvariable=self.v_family, values=[self._font_default] + fams, width=14, state="readonly")
+        fcb = ttk.Combobox(fb, textvariable=self.v_family, values=[self._font_default] + fams, width=14, state="readonly")
         fcb.pack(side="right", padx=(0, 6))
         fcb.bind("<<ComboboxSelected>>", self._font_picked)
 
@@ -2038,8 +2152,7 @@ class App:
         fcb.configure(postcommand=_font_refresh)
         # main-screen shortcuts: the things you need mid-meeting (they used to sit under Adjust > Advanced); their own
         # row under the font row, so the main window keeps its #1028 width in every UI language
-        bar2 = ttk.Frame(f)
-        bar2.pack(side="top", fill="x", pady=(2, 0))
+        bar2 = bar
         ttk.Checkbutton(bar2, text=t("gui_save"), variable=self.v_save).pack(side="left")
         ttk.Button(bar2, text=t("gui_copy_all"), command=lambda: self._log_copy(True)).pack(side="left", padx=(6, 0))
         ttk.Button(bar2, text=t("gui_topics_menu"), command=self._topics_toggle).pack(side="left", padx=(6, 0))
@@ -2049,6 +2162,19 @@ class App:
         self._cpu_poll()
         box = tk.Frame(f)
         box.pack(side="top", fill="both", expand=True)
+        self._font_inline = None
+
+        def _font_place(e=None):  # wide: font controls share the toolbar row; narrow: their own row (no clipping)
+            inline = f.winfo_width() >= FONT_INLINE_PX
+            if inline == self._font_inline:
+                return
+            self._font_inline = inline
+            fb.pack_forget()
+            if inline:
+                fb.pack(in_=bar, side="right")
+            else:
+                fb.pack(in_=f, side="top", anchor="e", before=box)
+        f.bind("<Configure>", _font_place, add="+")
         self._log_holder, self._log_box = box, box
         sb = ttk.Scrollbar(box, orient="vertical")
         self.log_text = tx = tk.Text(box, bd=0, highlightthickness=0, wrap="word", padx=4, pady=6, cursor="arrow",
@@ -2589,9 +2715,9 @@ class App:
             self.topics_cancel = ttk.Button(bar, text=t("gui_topics_cancel"), command=self._cancel_topics_download)
             self.topics_lang = ttk.Label(w, wraplength=DOCK_W - 30, justify="left")  # #1379: which language the notes use
             self.topics_lang.pack(side="top", fill="x", padx=8)
-            self.topics_hint = ttk.Label(w, wraplength=DOCK_W - 30, justify="left", foreground="#7f8c8d")
+            self.topics_hint = self._tok(ttk.Label(w, wraplength=DOCK_W - 30, justify="left"), "muted")
             self.topics_hint.pack(side="top", fill="x", padx=8)
-            self.topics_busy = ttk.Label(w, foreground="#2e86de")  # the model can take a minute: show it is working
+            self.topics_busy = self._tok(ttk.Label(w), "accent")  # the model can take a minute: show it is working
             self.topics_busy.pack(side="top", fill="x", padx=8)
             self.topics_text = tk.Text(w, wrap="word", height=20, borderwidth=0, padx=8, pady=6)
             self.topics_text.pack(side="top", fill="both", expand=True)

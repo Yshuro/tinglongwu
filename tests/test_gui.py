@@ -713,7 +713,7 @@ def test_update_controls_are_always_reachable_in_the_help_menu_756(_wizard_insta
 
     a = gui_app
     a.root.update()
-    assert str(a.root.cget("menu")) == str(a.menubar)
+    assert a.menubar_row.winfo_exists()
     help_menu = a.menubar.nametowidget(a.menubar.entrycget(a.menubar.index(t("gui_menu_help")), "menu"))
     labels = [help_menu.entrycget(i, "label") for i in range(help_menu.index("end") + 1)
               if help_menu.type(i) != "separator"]
