@@ -24,7 +24,7 @@ from .. import fmt
 # _live_main / _main look them up in this module, so monkeypatching proto.<name> keeps working.
 from .args import (PAUSE_MAX, PAUSE_MIN, _ru_model_ok, _warn_no_ru_model, build_parser, check_args,  # noqa: F401
                    default_whisper, resolve_tts_engine)
-from .listen_side import ListenSide  # noqa: F401
+from .listen_side import ListenSide as _ListenSide
 from .player import ABORT_JOIN_S, PLAY_BLOCK_S, Player, VramSampler, vram_used_mib  # noqa: F401
 from .session import (_close_items, _drain, _record_line, _run_auto_live, _run_confirm, _stop_live,  # noqa: F401
                       _to_bar, make_segmenter, paced_file_source, preview_notes)
@@ -98,18 +98,28 @@ def _live_main(a, asr, mt, tts, player, previewer, confirm, res) -> None:
             _close_items(utterances)  # #427: ends capture_segments, which joins the capture thread (recorder released)
 
 
+class ListenSide(_ListenSide):
+    """#1664: reverse/listen_side stays ui-free; this entry module (the one allowed reverse -> overlay edge)
+    hands it overlay.OverlaySink for the shared bar."""
+
+    def __init__(self, argv, run=None, parse=None, bar_q=None, bar_sink=None):
+        if bar_q is not None and bar_sink is None:
+            from ..overlay import OverlaySink as bar_sink
+        super().__init__(argv, run=run, parse=parse, bar_q=bar_q, bar_sink=bar_sink)
+
+
 def main(argv=None) -> int:
     vm: list = []
     try:
         ap = build_parser()
         pre = ap.parse_args(argv)
         if pre.overlay:  # #322: Tk owns the main thread, speak (+listen) runs on a worker
-            from ..overlay import OverlaySink, run_listen
+            from ..overlay import run_listen
 
             if pre.mic is None:
                 ap.error("--overlay needs live input (--mic)")
 
-            return run_listen(lambda q, stop: _main(argv, vm, q, stop, bar_sink=OverlaySink))
+            return run_listen(lambda q, stop: _main(argv, vm, q, stop))
         return _main(argv, vm)
     except KeyboardInterrupt:  # second Ctrl+C during shutdown (or Ctrl+C while loading): quit quietly
         print("\nstopping...", flush=True)
@@ -128,7 +138,7 @@ def main(argv=None) -> int:
                 pass
 
 
-def _main(argv, vm, bar_q=None, stop=None, bar_sink=None) -> int:
+def _main(argv, vm, bar_q=None, stop=None) -> int:
     ap = build_parser()
     a = ap.parse_args(argv)
     a.bar_q, a.ext_stop = bar_q, stop  # #322 --overlay (None otherwise)
@@ -141,7 +151,7 @@ def _main(argv, vm, bar_q=None, stop=None, bar_sink=None) -> int:
     listen = None
     if a.listen is not None:  # #285: both sides in this process; split one CPU budget (threads.py)
         try:
-            listen = ListenSide(a.listen, bar_q=bar_q, bar_sink=bar_sink)
+            listen = ListenSide(a.listen, bar_q=bar_q)
         except ValueError as e:
             ap.error(str(e))
         if listen.saver is not None:
