@@ -24,6 +24,7 @@ from .. import fmt
 # _live_main / _main look them up in this module, so monkeypatching proto.<name> keeps working.
 from .args import (PAUSE_MAX, PAUSE_MIN, _ru_model_ok, _warn_no_ru_model, build_parser, check_args,  # noqa: F401
                    default_whisper, resolve_tts_engine)
+from . import listen_side as _listen_side
 from .listen_side import ListenSide  # noqa: F401
 from .player import ABORT_JOIN_S, PLAY_BLOCK_S, Player, VramSampler, vram_used_mib  # noqa: F401
 from .session import (_close_items, _drain, _record_line, _run_auto_live, _run_confirm, _stop_live,  # noqa: F401
@@ -96,6 +97,17 @@ def _live_main(a, asr, mt, tts, player, previewer, confirm, res) -> None:
             cleanup()
         finally:
             _close_items(utterances)  # #427: ends capture_segments, which joins the capture thread (recorder released)
+
+
+def _overlay_sink(*args, **kw):
+    """#1664: reverse/listen_side stays ui-free; this entry module (the one allowed reverse -> overlay edge)
+    registers overlay.OverlaySink (imported lazily) as the shared-bar sink listen_side falls back to."""
+    from ..overlay import OverlaySink
+
+    return OverlaySink(*args, **kw)
+
+
+_listen_side.default_bar_sink = _overlay_sink
 
 
 def main(argv=None) -> int:

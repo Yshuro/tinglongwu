@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import sys
 import threading
 import weakref
 from pathlib import Path
+
+from .device import free_vram_mib  # noqa: F401 - #1664: lives in device (lower layer)
 
 # --engine choice -> engine name. hymt7b (#279), ollama and fm (#356, a local Ollama server / Apple's on-device
 # model) are opt-in only: choose_engine("auto") never returns them. opus was removed (#471): Hy-MT2 is the only
@@ -32,16 +33,6 @@ def engine_choice(v: str) -> str:
 # Hy-MT2-1.8B Q4_K_M uses ~1.5 GB VRAM (#66 benchmark; hwprobe.MT_VRAM_MIB) + 0.5 GB headroom (hwprobe.HEADROOM_MIB)
 HYMT_MIN_FREE_MIB = 2000
 N_CTX = 2048
-
-
-def free_vram_mib() -> int | None:
-    """Free memory (MiB) on GPU 0 via nvidia-smi (no extra deps); None if it cannot be determined."""
-    try:
-        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
-        return int(out.strip().splitlines()[0])
-    except Exception:  # noqa: BLE001 - no driver / no nvidia-smi
-        return None
 
 
 def choose_engine(requested: str, device: str, models_dir: Path, free_mib=free_vram_mib,

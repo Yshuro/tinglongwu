@@ -2,7 +2,7 @@
 partner -> mine, chosen from the ASR-detected language (`Transcript.lang`). Pure routing; no audio, no models."""
 from __future__ import annotations
 
-from .gui.core import SameLanguageError, lang_base
+from .langs import SameLanguageError, lang_base
 
 
 def candidates(mine: str, partner: str) -> tuple[str, ...]:

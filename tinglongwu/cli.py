@@ -620,9 +620,15 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
         # gui_cpu_mode text is not appended again (the status line carries it with the per-line MT ms)
         notice(" ".join(t("gpu_fallback", why=why).split()))
     elif notice is not None and dev == "cpu":
-        from .gui.core import cpu_mode_text
+        from .hwprobe import gpu_info  # #1664: same text as gui.core.cpu_mode_text, without importing the GUI
+        from .i18n import t
 
-        notice(cpu_mode_text())  # #780: --device cpu / no GPU asked for: still say CPU mode (#1525: GPU-aware wording)
+        try:
+            seen = gpu_info()[0] is not None
+        except Exception:  # noqa: BLE001 - no probe = say nothing about the GPU
+            seen = False
+        # #780: --device cpu / no GPU asked for: still say CPU mode (#1525: GPU-aware wording)
+        notice(t("gui_cpu_mode_gpu_unused" if seen else "gui_cpu_mode"))
     glossary = None
     if a.glossary:
         from .glossary import load as load_glossary
@@ -651,7 +657,7 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
 
         cands = f2f.candidates(a.to, a.face_to_face)  # raises SameLanguageError when both sides match
         a.lang = "auto"
-        from .gui.core import lang_base
+        from .langs import lang_base
 
         for side in (a.to, a.face_to_face):  # #1204: the zh side picks the Chinese variant (zh-cn -> cn, zh-tw -> tw)
             if side in ("zh-tw", "zh-cn"):

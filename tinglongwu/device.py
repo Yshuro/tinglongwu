@@ -286,7 +286,17 @@ def asr_compute_type(device: str, free_mib=None) -> str:
     if device != "cuda":
         return "int8"
     if free_mib is None:
-        from .engines import free_vram_mib
-
         free_mib = free_vram_mib()
     return "int8_float16" if free_mib is not None and free_mib < ASR_FP16_MIN_FREE_MIB else "float16"
+
+
+def free_vram_mib() -> int | None:
+    """Free memory (MiB) on GPU 0 via nvidia-smi (no extra deps); None if it cannot be determined."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=10, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        return int(out.strip().splitlines()[0])
+    except Exception:  # noqa: BLE001 - no driver / no nvidia-smi
+        return None

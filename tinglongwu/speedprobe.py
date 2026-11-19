@@ -170,7 +170,7 @@ def signature(hw: HwInfo) -> str:
 
 
 def cache_path() -> Path:
-    from .gui.core import settings_path
+    from .settings import settings_path
 
     return settings_path().parent / "speedprobe.json"
 

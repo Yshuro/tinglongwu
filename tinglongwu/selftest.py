@@ -268,7 +268,7 @@ def apply_to_gui(res: Result, requested_model: str | None = None, path=None) -> 
     """Write the configuration that passed into the GUI settings: the tested speech model on a fresh install or
     when it had to change, and live draft off on the CPU tier. The engine is left alone (auto already runs Hy-MT2
     on the CPU when the GPU cannot, #276)."""
-    from .gui import core
+    from . import settings as core  # #1664: gui.json read/write without importing the GUI
 
     fresh = not Path(path or core.settings_path()).exists()
     s = core.load_settings(path)

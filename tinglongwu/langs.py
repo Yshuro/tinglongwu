@@ -116,6 +116,17 @@ def menu_help(lang: str | None = None) -> str:
     exp = sep.join(f"{c} {name(c, ui)}" for c in EXPERIMENTAL)
     return f"{tx['focus']}\n  {focus}\n{tx['exp_head']}\n  {exp}\n{tx['speak']}"
 
+class SameLanguageError(ValueError):
+    """#981: My language and Other side language are the same language: nothing to translate, no session starts.
+    `key` is the i18n key of the one-line message the GUI shows instead of starting."""
+
+    key = "gui_same_lang"
+
+
+def lang_base(code: str | None) -> str:
+    """Language without the script variant: zh-tw / zh-cn -> zh; anything else unchanged ("" for None)."""
+    return "zh" if code in ("zh", "zh-tw", "zh-cn") else (code or "")
+
 
 def main(argv=None) -> int:
     try:
@@ -134,3 +145,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
