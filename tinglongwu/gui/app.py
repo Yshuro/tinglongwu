@@ -2018,11 +2018,14 @@ class App:
             except Exception:  # noqa: BLE001
                 pass
         fcb.configure(postcommand=_font_refresh)
-        # main-screen shortcuts: the things you need mid-meeting (they used to sit under Adjust > Advanced)
-        ttk.Checkbutton(bar, text=t("gui_save"), variable=self.v_save).pack(side="left")
-        ttk.Button(bar, text=t("gui_copy_all"), command=lambda: self._log_copy(True)).pack(side="left", padx=(6, 0))
-        ttk.Button(bar, text=t("gui_topics_menu"), command=self._topics_toggle).pack(side="left", padx=(6, 0))
-        self.lbl_cpu = ttk.Label(bar, text="")
+        # main-screen shortcuts: the things you need mid-meeting (they used to sit under Adjust > Advanced); their own
+        # row under the font row, so the main window keeps its #1028 width in every UI language
+        bar2 = ttk.Frame(f)
+        bar2.pack(side="top", fill="x", pady=(2, 0))
+        ttk.Checkbutton(bar2, text=t("gui_save"), variable=self.v_save).pack(side="left")
+        ttk.Button(bar2, text=t("gui_copy_all"), command=lambda: self._log_copy(True)).pack(side="left", padx=(6, 0))
+        ttk.Button(bar2, text=t("gui_topics_menu"), command=self._topics_toggle).pack(side="left", padx=(6, 0))
+        self.lbl_cpu = ttk.Label(bar2, text="")
         self.lbl_cpu.pack(side="left", padx=(10, 0))
         self._cpu_prev = None
         self._cpu_poll()
