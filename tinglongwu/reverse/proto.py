@@ -24,7 +24,8 @@ from .. import fmt
 # _live_main / _main look them up in this module, so monkeypatching proto.<name> keeps working.
 from .args import (PAUSE_MAX, PAUSE_MIN, _ru_model_ok, _warn_no_ru_model, build_parser, check_args,  # noqa: F401
                    default_whisper, resolve_tts_engine)
-from .listen_side import ListenSide as _ListenSide
+from . import listen_side as _listen_side
+from .listen_side import ListenSide  # noqa: F401
 from .player import ABORT_JOIN_S, PLAY_BLOCK_S, Player, VramSampler, vram_used_mib  # noqa: F401
 from .session import (_close_items, _drain, _record_line, _run_auto_live, _run_confirm, _stop_live,  # noqa: F401
                       _to_bar, make_segmenter, paced_file_source, preview_notes)
@@ -98,14 +99,15 @@ def _live_main(a, asr, mt, tts, player, previewer, confirm, res) -> None:
             _close_items(utterances)  # #427: ends capture_segments, which joins the capture thread (recorder released)
 
 
-class ListenSide(_ListenSide):
+def _overlay_sink(*args, **kw):
     """#1664: reverse/listen_side stays ui-free; this entry module (the one allowed reverse -> overlay edge)
-    hands it overlay.OverlaySink for the shared bar."""
+    registers overlay.OverlaySink (imported lazily) as the shared-bar sink listen_side falls back to."""
+    from ..overlay import OverlaySink
 
-    def __init__(self, argv, run=None, parse=None, bar_q=None, bar_sink=None):
-        if bar_q is not None and bar_sink is None:
-            from ..overlay import OverlaySink as bar_sink
-        super().__init__(argv, run=run, parse=parse, bar_q=bar_q, bar_sink=bar_sink)
+    return OverlaySink(*args, **kw)
+
+
+_listen_side.default_bar_sink = _overlay_sink
 
 
 def main(argv=None) -> int:
