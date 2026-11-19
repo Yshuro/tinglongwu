@@ -432,9 +432,11 @@ class _DockPane(ttk.Frame):
     def __init__(self, app, holder, before):
         super().__init__(holder, width=DOCK_W)
         self._app, self._before, self._grew = app, before, 0
-        grip = tk.Frame(self, width=6, cursor="sb_h_double_arrow", bg="#8a8a8a")  # drag the left edge to resize
+        grip = tk.Frame(self, width=3, cursor="sb_h_double_arrow", bg="#555555")  # drag the left edge to resize
         grip.pack(side="left", fill="y")
         grip.bind("<B1-Motion>", self._drag)
+        grip.bind("<Enter>", lambda e: grip.configure(bg="#2e86de"))  # a thin line that lights up under the mouse
+        grip.bind("<Leave>", lambda e: grip.configure(bg="#555555"))
         self.bind("<Configure>", self._rewrap, add="+")
 
     def _drag(self, e):
