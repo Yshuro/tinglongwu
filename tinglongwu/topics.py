@@ -83,12 +83,17 @@ _TITLE = re.compile(r"^\s*TITLE\s*[:：]\s*(.+)$", re.I)
 _BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+(.+)$")
 
 
+_NO_ACTION = re.compile(r"^[\s\-–—.。]*(無|无|沒有|没有|なし|無し|none|n/?a|nothing|no actions?|нет)[\s.。]*$", re.I)
+
+
 def parse_summary(text: str, start: float = 0.0, end: float = 0.0) -> Topic:
-    """Model output -> Topic; tolerant of extra blank lines, numbering and missing parts."""
+    """Model output -> Topic; tolerant of extra blank lines, numbering and missing parts.
+    An ACTION line that only says "none" is dropped (the prompt allows "none is fine"; the panel showed `→ me: 無`)."""
     title, bullets, actions = "", [], []
     for raw in (text or "").splitlines():
         if m := _ACTION.match(raw):
-            actions.append((m.group(1).lower(), m.group(2).strip()))
+            if not _NO_ACTION.match(m.group(2)):
+                actions.append((m.group(1).lower(), m.group(2).strip()))
         elif m := _TITLE.match(raw):
             title = title or m.group(1).strip()
         elif m := _BULLET.match(raw):
@@ -136,8 +141,10 @@ class TopicSummarizer:
     submit() never waits for the model; close() lets the queue drain (the after-the-meeting backlog)."""
 
     def __init__(self, summarize: Callable[[str], str], on_topic: Callable[[Topic], None],
-                 lower_priority: Callable[[], bool] = lower_thread_priority, log=None, lang: str | None = None):
+                 lower_priority: Callable[[], bool] = lower_thread_priority, log=None, lang: str | None = None,
+                 on_state: Callable[[bool], None] | None = None):
         self.summarize, self.on_topic, self._lower, self.lang = summarize, on_topic, lower_priority, lang
+        self.on_state = on_state  # busy True while the model runs a topic, False after (the GUI shows "summarizing")
         self.log = log or (lambda m: print(m, file=sys.stderr, flush=True))
         self.q: queue.Queue = queue.Queue()
         self.lowered: bool | None = None
@@ -157,11 +164,21 @@ class TopicSummarizer:
             lines = self.q.get()
             if lines is None:
                 return
+            self._state(True)
             try:
                 text = self.summarize(build_prompt(lines, self.lang))
                 self.on_topic(parse_summary(text, lines[0].t, lines[-1].t))
             except Exception as e:  # noqa: BLE001 - notes are a side feature: never stop the meeting over them
                 self.log(f"tlwu: topic summary failed: {e}")
+            finally:
+                self._state(False)
+
+    def _state(self, busy: bool) -> None:
+        if self.on_state is not None:
+            try:
+                self.on_state(busy)
+            except Exception:  # noqa: BLE001 - a broken indicator must not stop the notes
+                pass
 
     def close(self, timeout: float | None = None) -> None:
         self.q.put(None)
@@ -180,7 +197,8 @@ class TopicNotes:
         self.segmenter = segmenter or PauseSegmenter()
         self.topics: list[Topic] = []
         self._lock = threading.Lock()  # both sides call on_line (listen thread + speak thread)
-        self.worker = TopicSummarizer(summarize, self._done, lower_priority=lower_priority, log=log, lang=lang)
+        self.worker = TopicSummarizer(summarize, self._done, lower_priority=lower_priority, log=log, lang=lang,
+                                      on_state=getattr(on_topic, "state", None))  # the GUI panel has .state(busy)
 
     def on_line(self, rec: dict) -> None:
         # #1642: with a known user language the prompt asks for notes in it, so both sides feed the original words
