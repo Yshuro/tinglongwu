@@ -66,5 +66,5 @@ def test_notes_window_follows_theme_and_marks_bullets(app_1644):
         assert str(a.log_text.cget("bg")) == BUBBLE[theme]["bg"]
         assert str(tx.tag_cget("when", "foreground")) == NOTES[theme]["when"]
         marks = tx.tag_ranges("mark")
-        assert [tx.get(marks[i], marks[i + 1]) for i in range(0, len(marks), 2)] == ["•", "→"]
-        assert "one point" in tx.get("1.0", "end") and "me: do it" in tx.get("1.0", "end")
+        assert [tx.get(marks[i], marks[i + 1]) for i in range(0, len(marks), 2)] == ["•"]  # #1633: the action line is not shown
+        assert "one point" in tx.get("1.0", "end") and "me: do it" not in tx.get("1.0", "end")

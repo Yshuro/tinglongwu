@@ -2155,8 +2155,8 @@ class App:
         ttk.Checkbutton(bar2, text=t("gui_save"), variable=self.v_save).pack(side="left")
         ttk.Button(bar2, text=t("gui_copy_all"), command=lambda: self._log_copy(True)).pack(side="left", padx=(6, 0))
         ttk.Button(bar2, text=t("gui_topics_menu"), command=self._topics_toggle).pack(side="left", padx=(6, 0))
-        self.lbl_cpu = ttk.Label(bar2, text="")
-        self.lbl_cpu.pack(side="left", padx=(10, 0))
+        self.lbl_cpu = ttk.Label(bar2, text="", font="TkSmallCaptionFont")  # smaller: Linux fonts run wider (#1632)
+        self.lbl_cpu.pack(side="left", padx=(6, 0))
         self._cpu_prev = None
         self._cpu_poll()
         box = tk.Frame(f)
