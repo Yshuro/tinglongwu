@@ -74,7 +74,8 @@ UNINSTALL_URI = "ms-settings:appsfeatures"  # #738: File > Uninstall opens Windo
 FONT_MENU_SIZES = tuple(range(FONT_MIN, FONT_MAX + 1, 4))  # #738: Settings > Font size choices (12, 16, ... 72)
 UI_LANGS = {"繁體中文": "zh-TW", "English": "en", "Русский": "ru", "日本語": "ja"}
 STATUS_WRAP_MIN_PX = 200  # #1241: status / notice wrap at the panel width, never narrower than this
-BAR_WIDE_PX = 700  # #1241: from this bar width the 情境 dropdown and the toggles share one row
+BAR_WIDE_PX = 1200  # #1241: from this bar width the 情境 dropdown and the toggles share one row
+FONT_INLINE_PX = 500  # chat toolbar: font controls share the row from this width
 BAR_ONE_ROW_PX = 1200  # the whole bottom bar (情境, toggles, Adjust / Freeze / Start) on one row from this width
 MAIN_W, MAIN_H, MAIN_MIN_W, MAIN_MIN_H = 460, 640, 380, 480  # #1028: the chat-style main window
 # chat bubbles (#1028): other side on the left, me on the right; (bubble background, text) per theme
@@ -681,7 +682,7 @@ class App:
         for style in ("TFrame", "TLabel", "TCheckbutton", "TRadiobutton", "Toolbutton"):
             st.configure(style, background=pal["win"])
         st.configure("TLabel", foreground=pal["fg"])
-        st.configure("Menu.TMenubutton", padding=(10, 3), background=pal["win"], foreground=pal["fg"])
+        st.configure("Menu.TMenubutton", padding=(8, 0), background=pal["win"], foreground=pal["fg"])
         st.configure("Card.TFrame", background=pal["win"])
         st.configure("Start.Accent.TButton", font=(FONT_FAMILY, 13, "bold"), padding=(14, 8))  # #1028: the big Start
         self._retint()
@@ -1482,23 +1483,23 @@ class App:
         p.resizable(True, True)  # #939: a normal resizable window; size and position are remembered
         p.protocol("WM_DELETE_WINDOW", p.withdraw)
         self._build_sidebar(p)
-        self.body = body = ttk.Frame(p, padding=(12, 6, 12, 6))
+        self.body = body = ttk.Frame(p, padding=(12, 3, 12, 3))
         body.pack(side="left", fill="both", expand=True)
         short = p.winfo_screenheight() < SHORT_SCREEN_PX  # #886: a 768 px screen has no height to spare
         self.settings_title = self._tx(ttk.Label(body, font=(FONT_FAMILY, 14, "bold")), "gui_menu_settings")
-        self.settings_title.pack(anchor="w", pady=(0, 2 if short else 6))
+        self.settings_title.pack(anchor="w", pady=(0, 2 if short else 4))
         card = "Card.TFrame" if sv_ttk is not None else "TFrame"
 
         def group(title_key):  # #1028: one plain-language group = a bold heading + its choices
             g = ttk.Frame(body, style=card, padding=(10, 3 if short else 5, 10, 3 if short else 5))
-            g.pack(fill="x", pady=(0, 4))
+            g.pack(fill="x", pady=(0, 3))
             self._tx(ttk.Label(g, font=(FONT_FAMILY, 11, "bold")), title_key).pack(anchor="w")
             return g
 
         g_speed, g_appear = group("gui_set_speed"), group("gui_set_appear")
         g_mine, g_rec = group("gui_set_mine"), group("gui_set_records")
         self.card_adv = ttk.Frame(body, style=card, padding=(ADV_PAD_X // 2, 4, ADV_PAD_X // 2, 4))  # the Advanced toggle + everything else
-        self.card_adv.pack(fill="x", pady=(2, 0))
+        self.card_adv.pack(fill="x", pady=(0, 0))
         self.frm = f = ttk.Frame(self.card_adv, padding=(0, 4, 0, 0))
         f.columnconfigure(3, minsize=14)  # #886: gap between the two setting columns
         for col in (1, 5):  # the two control columns share the card's width (the "..." buttons stay narrow)
@@ -1937,7 +1938,7 @@ class App:
         row = getattr(self, attr + "_row", None)
         sepname = "menu_sep" if win is self.root else attr + "_sep"
         if row is None or not row.winfo_exists():
-            row = ttk.Frame(win, padding=(6, 2, 6, 0))
+            row = ttk.Frame(win, padding=(6, 0, 6, 0))
             sep = tk.Frame(win, height=1, bd=0)
             anchor = self.top_frame if win is self.root else self.settings_title
             row.pack(side="top", fill="x", before=anchor)
@@ -2164,7 +2165,7 @@ class App:
         self._font_inline = None
 
         def _font_place(e=None):  # wide: font controls share the toolbar row; narrow: their own row (no clipping)
-            inline = f.winfo_width() >= BAR_WIDE_PX - 200
+            inline = f.winfo_width() >= FONT_INLINE_PX
             if inline == self._font_inline:
                 return
             self._font_inline = inline
