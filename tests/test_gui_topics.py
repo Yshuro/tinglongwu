@@ -125,8 +125,13 @@ def test_gui_window_lists_three_topics_from_the_summarizer(tmp_path, monkeypatch
         assert a.topics_win is not None and a.topics_win.winfo_exists()
         text = a.topics_text.get("1.0", "end")
         for n in (1, 2, 3):
-            assert f"Topic {n}" in text and f"point {n}a" in text and f"me: do {n}" in text
+            assert f"Topic {n}" in text and f"point {n}a" in text
+        assert "me: do" not in text  # action lines are not shown for now
         assert a.topics_hint.cget("text") == ""
+        assert str(a.topics_text.tag_cget("b0", "elide")) in ("1", "True")  # collapsed: titles only
+        a._topic_toggle(0)  # a click on the first title opens its key points
+        assert str(a.topics_text.tag_cget("b0", "elide")) in ("0", "False", "")
+        assert str(a.topics_text.tag_cget("b1", "elide")) in ("1", "True")
     finally:
         a.root.destroy()
 

@@ -2576,14 +2576,17 @@ class App:
         tx = self.topics_text
         tx.configure(state="normal")
         tx.delete("1.0", "end")
-        for e in entries:
-            tx.insert("end", e["title"] + "\n", "title")
-            tx.insert("end", e["when"] + "\n", "when")
+        opened = self.__dict__.setdefault("_topics_open", set())
+        tx.tag_configure("bullet", lmargin1=8, lmargin2=22)  # hanging indent: the dot and its text share a line
+        for i, e in enumerate(entries):
+            tx.insert("end", ("\u25be " if i in opened else "\u25b8 ") + e["title"], ("title", f"t{i}"))
+            tx.insert("end", "  " + e["when"] + "\n", "when")
             for b in e["bullets"]:
-                tx.insert("end", f"\u2022 {b}\n")
-            for a in e["actions"]:
-                tx.insert("end", f"\u2192 {a}\n")
-            tx.insert("end", "\n")
+                tx.insert("end", f"\u2022 {b}\n", ("bullet", f"b{i}"))
+            tx.tag_configure(f"b{i}", elide=i not in opened)  # collapsed: titles only; click a title to read its points
+            tx.tag_bind(f"t{i}", "<Button-1>", lambda _e, i=i: self._topic_toggle(i))
+            tx.tag_bind(f"t{i}", "<Enter>", lambda _e: tx.configure(cursor="hand2"))
+            tx.tag_bind(f"t{i}", "<Leave>", lambda _e: tx.configure(cursor=""))
         tx.configure(state="disabled")
         self._topics_busy_tick()
         if show and not self._topics_closed:
@@ -2591,6 +2594,11 @@ class App:
             w.lift()
 
     _topics_busy_job = None
+
+    def _topic_toggle(self, i: int):
+        """Click a topic title: show / hide its key points (the set of open topics is kept across redraws)."""
+        self.__dict__.setdefault("_topics_open", set()).symmetric_difference_update({i})
+        self.render_topics()
 
     def _topics_busy_tick(self):
         """Label 'Summarizing... N s' while the model runs a topic; refreshes every second, leaves the text alone."""
@@ -2845,6 +2853,7 @@ class App:
         self.errored = False
         self.listening = True
         self.speak_run = speak_run  # #1001: read by _work (both legs) before the worker posts "stopped"
+        self.__dict__["_topics_open"] = set()  # topic numbers restart with the run
         self.topic_panel.clear()  # #611: the panel shows this run's topics only (the .topics.md file keeps them)
         if topics_on(self.settings) and topics_model_path(self.settings) and not self._topics_closed:
             self.render_topics(show=True)  # notes are on: the pane is there from the start of the meeting
