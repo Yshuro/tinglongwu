@@ -2844,6 +2844,8 @@ class App:
         self.listening = True
         self.speak_run = speak_run  # #1001: read by _work (both legs) before the worker posts "stopped"
         self.topic_panel.clear()  # #611: the panel shows this run's topics only (the .topics.md file keeps them)
+        if topics_on(self.settings) and topics_model_path(self.settings) and not self._topics_closed:
+            self.render_topics(show=True)  # notes are on: the pane is there from the start of the meeting
         self.worker = threading.Thread(target=self._work, args=(run, self.stop_ev), daemon=True)
         self.worker.start()
         self.run_snapshot = self._start_values()  # #983
