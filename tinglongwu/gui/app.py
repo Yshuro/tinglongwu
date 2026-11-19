@@ -392,6 +392,31 @@ class Tour:
         self.visible = False
 
 
+def _system_cpu_percent(app):
+    """Busy share of all CPUs since the previous call, in percent, or None (not Windows / first call / error)."""
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    idle, kern, user = wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME()
+    if not ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kern), ctypes.byref(user)):
+        return None
+
+    def n(ft):
+        return (ft.dwHighDateTime << 32) | ft.dwLowDateTime
+
+    cur = (n(idle), n(kern) + n(user))  # kernel time already includes idle time
+    prev, app._cpu_prev = app._cpu_prev, cur
+    if prev is None:
+        return None
+    d_total = cur[1] - prev[1]
+    d_idle = cur[0] - prev[0]
+    if d_total <= 0:
+        return None
+    return max(0, min(100, round(100 * (d_total - d_idle) / d_total)))
+
+
 class App:
     def __init__(self):
         self.settings = load_settings()
@@ -609,7 +634,7 @@ class App:
         self._pair_changed()
         self.overlay.build_menu()
         self.log_menu.entryconfigure(0, label=t("gui_menu_wrong_line"))
-        self.log_menu.entryconfigure(1, label=t("gui_menu_copy"))
+        self.log_menu.entryconfigure(1, label=t("gui_log_copy"))
         self.build_menubar()
         self._upd_relabel()
         self._draw_sidebar()
@@ -1843,6 +1868,16 @@ class App:
         if hasattr(self, "btn"):
             self.btn.configure(state="normal" if enabled or self._quick_phase() == "running" else "disabled")
 
+    def _cpu_poll(self):
+        """Whole-PC CPU load next to the log (Windows: GetSystemTimes; other systems: hidden). Never raises."""
+        try:
+            pct = _system_cpu_percent(self)
+            if pct is not None:
+                self.lbl_cpu.configure(text=t("gui_cpu", p=pct), foreground="#c0392b" if pct >= 85 else "")
+            self.root.after(2000, self._cpu_poll)
+        except Exception:
+            pass
+
     def _build_log(self, f):
         """The conversation in the main window (#1028): chat bubbles, other side on the left, me on the right, the
         original text small under each bubble; scrolling history, newest at the bottom (#72)."""
@@ -1851,6 +1886,14 @@ class App:
         bar.pack(side="top", fill="x")
         ttk.Button(bar, text="A+", width=3, command=lambda: self.bump_log_font(2)).pack(side="right")
         ttk.Button(bar, text="A-", width=3, command=lambda: self.bump_log_font(-2)).pack(side="right", padx=(0, 2))
+        # main-screen shortcuts: the things you need mid-meeting (they used to sit under Adjust > Advanced)
+        ttk.Checkbutton(bar, text=t("gui_save"), variable=self.v_save).pack(side="left")
+        ttk.Button(bar, text=t("gui_copy_all"), command=lambda: self._log_copy(True)).pack(side="left", padx=(6, 0))
+        ttk.Button(bar, text=t("gui_topics_menu"), command=lambda: self.render_topics(show=True)).pack(side="left", padx=(6, 0))
+        self.lbl_cpu = ttk.Label(bar, text="")
+        self.lbl_cpu.pack(side="left", padx=(10, 0))
+        self._cpu_prev = None
+        self._cpu_poll()
         box = tk.Frame(f)
         box.pack(side="top", fill="both", expand=True)
         sb = ttk.Scrollbar(box, orient="vertical")
@@ -2329,6 +2372,17 @@ class App:
         if sd is not None and ok:  # #739: the first Start goes on by itself
             self.toggle(getattr(self, "pack_retry", None))
 
+    def _topics_copy(self):
+        """Copy the selected meeting-notes text, or all of it when nothing is selected."""
+        tx = self.topics_text
+        try:
+            txt = tx.get("sel.first", "sel.last")
+        except tk.TclError:
+            txt = tx.get("1.0", "end-1c")
+        if txt:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(txt)
+
     def render_topics(self, show: bool = False):
         """#611: the topic notes side window: one block per finished topic (title, time, key points, actions), plus
         the on/off switch and the GGUF model picker. Created on first use; redrawn from self.topic_panel."""
@@ -2346,6 +2400,7 @@ class App:
             ttk.Checkbutton(bar, text=t("gui_topics_switch"), variable=self._topics_var(),
                             command=self._topics_toggled).pack(side="left")
             ttk.Button(bar, text=t("gui_topics_model"), command=self.pick_topics_model).pack(side="right")
+            ttk.Button(bar, text=t("gui_log_copy"), command=self._topics_copy).pack(side="right", padx=(0, 6))
             self.topics_cancel = ttk.Button(bar, text=t("gui_topics_cancel"), command=self._cancel_topics_download)
             self.topics_lang = ttk.Label(w, wraplength=340, justify="left")  # #1379: which language the notes use
             self.topics_lang.pack(side="top", fill="x", padx=8)
@@ -2355,6 +2410,8 @@ class App:
             self.topics_text.tag_configure("title", font=("TkDefaultFont", 12, "bold"))
             self.topics_text.tag_configure("when", foreground="#7f8c8d")
             self.topics_text.pack(side="top", fill="both", expand=True)
+            self.topics_text.bind("<Button-1>", lambda e: self.topics_text.focus_set(), add="+")
+            self.topics_text.bind("<Control-c>", lambda e: (self._topics_copy(), "break")[1])
         from ..langs import name as lang_name
         from .core import TOPICS_MB, _gpu_usable
         from .topics_panel import panel_hint
