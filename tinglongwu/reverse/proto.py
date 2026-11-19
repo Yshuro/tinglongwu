@@ -104,12 +104,12 @@ def main(argv=None) -> int:
         ap = build_parser()
         pre = ap.parse_args(argv)
         if pre.overlay:  # #322: Tk owns the main thread, speak (+listen) runs on a worker
-            from ..overlay import run_listen
+            from ..overlay import OverlaySink, run_listen
 
             if pre.mic is None:
                 ap.error("--overlay needs live input (--mic)")
 
-            return run_listen(lambda q, stop: _main(argv, vm, q, stop))
+            return run_listen(lambda q, stop: _main(argv, vm, q, stop, bar_sink=OverlaySink))
         return _main(argv, vm)
     except KeyboardInterrupt:  # second Ctrl+C during shutdown (or Ctrl+C while loading): quit quietly
         print("\nstopping...", flush=True)
@@ -128,7 +128,7 @@ def main(argv=None) -> int:
                 pass
 
 
-def _main(argv, vm, bar_q=None, stop=None) -> int:
+def _main(argv, vm, bar_q=None, stop=None, bar_sink=None) -> int:
     ap = build_parser()
     a = ap.parse_args(argv)
     a.bar_q, a.ext_stop = bar_q, stop  # #322 --overlay (None otherwise)
@@ -141,7 +141,7 @@ def _main(argv, vm, bar_q=None, stop=None) -> int:
     listen = None
     if a.listen is not None:  # #285: both sides in this process; split one CPU budget (threads.py)
         try:
-            listen = ListenSide(a.listen, bar_q=bar_q)
+            listen = ListenSide(a.listen, bar_q=bar_q, bar_sink=bar_sink)
         except ValueError as e:
             ap.error(str(e))
         if listen.saver is not None:

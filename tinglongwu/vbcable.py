@@ -20,8 +20,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .reverse.vmic import pick_win_cable
-
 VBCABLE_URL = "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip"
 VBCABLE_SHA256 = "b950e39f01af1d04ea623c8f6d8eb9b6ea5c477c637295fabf20631c85116bfb"  # sha256 of VBCABLE_URL (VBCABLE_Driver_Pack45.zip, 1318877 bytes), measured 2026-11-15
 VBCABLE_PAGE = "https://vb-audio.com/Cable/"
@@ -198,3 +196,26 @@ def child_download(dest: Path | None = None, run=None) -> str | None:
 def child_install(zip_path, run=None) -> int:
     """Run the install child (extract + elevated setup, UAC prompt). Its return code."""
     return _run(install_cmd(zip_path), run).returncode
+
+
+WIN_CABLE = "CABLE Input"  # VB-CABLE playback side; Meet/Zoom record its "CABLE Output" end
+
+
+def pick_win_cable(names: list[str], want: str = WIN_CABLE) -> str | None:
+    """Windows output device to speak into (#311): first name STARTING with "CABLE Input" (case-insensitive), else
+    the first name containing it, or None. Prefix first so "Hi-Fi Cable Input (VB-Audio Hi-Fi Cable)" listed before
+    the real VB-CABLE device is not picked (#1089)."""
+    i = match_device_index(names, want)
+    return None if i is None else names[i]
+
+
+def match_device_index(names: list[str], needle: str) -> int | None:
+    """Index of the best case-insensitive match for `needle`: exact name, then name starting with it, then name
+    containing it (first in list order within each tier); None when nothing matches (#1089)."""
+    w = needle.casefold()
+    folded = [n.casefold() for n in names]
+    for test in (lambda n: n == w, lambda n: n.startswith(w), lambda n: w in n):
+        for i, n in enumerate(folded):
+            if test(n):
+                return i
+    return None
