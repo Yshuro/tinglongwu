@@ -232,10 +232,11 @@ class Overlay:
     def set_font(self, n: int):
         n = clamp_font(n)
         self.app.settings["font_size"] = n
-        self.font = tkfont.Font(family=FONT_FAMILY, size=n, weight="bold")
+        fam = self.app.settings.get("font_family") or FONT_FAMILY  # user-picked system font, else the default
+        self.font = tkfont.Font(family=fam, size=n, weight="bold")
         for tag in ("final", "draft"):
             self.text.tag_configure(tag, font=self.font)
-        self.text.tag_configure("src", font=(FONT_FAMILY, max(9, n * 2 // 3)))
+        self.text.tag_configure("src", font=(fam, max(9, n * 2 // 3)))
         self.set_rows(self.rows)
         size_var = getattr(self.app, "v_font", None)
         if size_var is not None and size_var.get() != str(n):
@@ -1868,12 +1869,34 @@ class App:
         if hasattr(self, "btn"):
             self.btn.configure(state="normal" if enabled or self._quick_phase() == "running" else "disabled")
 
+    def _font_picked(self, _e=None):
+        """Use the chosen system font for the subtitle log and the floating bar (saved)."""
+        name = self.v_family.get()
+        self.settings["font_family"] = "" if name == self._font_default else name
+        save_settings(self.settings)
+        self._chat_tags()
+        try:
+            self.overlay.set_font(self.settings["font_size"])
+        except Exception:  # noqa: BLE001
+            pass
+        self.render_log()
+
     def _cpu_poll(self):
         """Whole-PC CPU load next to the log (Windows: GetSystemTimes; other systems: hidden). Never raises."""
         try:
             pct = _system_cpu_percent(self)
+            if getattr(self, "_gpu_ok", None) is None:
+                try:
+                    from .core import _gpu_usable
+                    self._gpu_ok = bool(_gpu_usable())
+                except Exception:  # noqa: BLE001
+                    self._gpu_ok = False
+            on_gpu = self._gpu_ok and self.settings.get("gpu_use") != "off"
+            mode = t("gui_mode_gpu" if on_gpu else "gui_mode_cpu")
             if pct is not None:
-                self.lbl_cpu.configure(text=t("gui_cpu", p=pct), foreground="#c0392b" if pct >= 85 else "")
+                self.lbl_cpu.configure(text=mode + "  " + t("gui_cpu", p=pct), foreground="#c0392b" if pct >= 85 else "")
+            elif not self.lbl_cpu.cget("text"):
+                self.lbl_cpu.configure(text=mode)
             self.root.after(2000, self._cpu_poll)
         except Exception:
             pass
@@ -1886,6 +1909,15 @@ class App:
         bar.pack(side="top", fill="x")
         ttk.Button(bar, text="A+", width=3, command=lambda: self.bump_log_font(2)).pack(side="right")
         ttk.Button(bar, text="A-", width=3, command=lambda: self.bump_log_font(-2)).pack(side="right", padx=(0, 2))
+        try:  # every font the system has; "" = the program's default
+            fams = sorted({f for f in tkfont.families(self.root) if not f.startswith("@")}, key=str.lower)
+        except Exception:  # noqa: BLE001
+            fams = []
+        self._font_default = t("gui_font_default")
+        self.v_family = tk.StringVar(value=self.settings.get("font_family") or self._font_default)
+        fcb = ttk.Combobox(bar, textvariable=self.v_family, values=[self._font_default] + fams, width=14, state="readonly")
+        fcb.pack(side="right", padx=(0, 6))
+        fcb.bind("<<ComboboxSelected>>", self._font_picked)
         # main-screen shortcuts: the things you need mid-meeting (they used to sit under Adjust > Advanced)
         ttk.Checkbutton(bar, text=t("gui_save"), variable=self.v_save).pack(side="left")
         ttk.Button(bar, text=t("gui_copy_all"), command=lambda: self._log_copy(True)).pack(side="left", padx=(6, 0))
@@ -1943,6 +1975,7 @@ class App:
         tx = self.log_text
         tx.configure(bg=pal["bg"])
         small = max(8, n * 2 // 3)
+        fam = self.settings.get("font_family") or FONT_FAMILY  # user-picked system font, else the default
         # #1052: a bubble is at most ~75 % of the window and hugs its text: the background sits on the text only
         # (the line break is outside the bubble tag), margins push it to its side
         try:
@@ -1954,13 +1987,13 @@ class App:
             bg, fg = pal[side]
             base = dict(lmargin1=lm, lmargin2=lm, rmargin=rm, justify=just)
             tx.tag_configure(f"{side}_base", **base)
-            tx.tag_configure(f"{side}_head", foreground=pal["head"], font=(FONT_FAMILY, small, "bold"), spacing1=8, **base)
-            tx.tag_configure(f"{side}_final", background=bg, foreground=fg, font=(FONT_FAMILY, n), spacing1=2,
+            tx.tag_configure(f"{side}_head", foreground=pal["head"], font=(fam, small, "bold"), spacing1=8, **base)
+            tx.tag_configure(f"{side}_final", background=bg, foreground=fg, font=(fam, n), spacing1=2,
                              spacing3=2, **base)
-            tx.tag_configure(f"{side}_draft", background=bg, foreground=pal["sub"], font=(FONT_FAMILY, n), spacing1=2,
+            tx.tag_configure(f"{side}_draft", background=bg, foreground=pal["sub"], font=(fam, n), spacing1=2,
                              spacing3=2, **base)
-            tx.tag_configure(f"{side}_src", foreground=pal["sub"], font=(FONT_FAMILY, small), **base)
-        tx.tag_configure("hint", foreground=pal["sub"], font=(FONT_FAMILY, small + 2), justify="center", spacing1=40)
+            tx.tag_configure(f"{side}_src", foreground=pal["sub"], font=(fam, small), **base)
+        tx.tag_configure("hint", foreground=pal["sub"], font=(fam, small + 2), justify="center", spacing1=40)
 
     def bump_log_font(self, d: int):
         follow = self._log_at_end()
