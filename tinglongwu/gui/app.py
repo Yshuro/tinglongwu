@@ -2032,21 +2032,21 @@ class App:
         self._tx(ttk.Label(q), "gui_quick_target").grid(row=0, column=0, sticky="w")
         self.home_target = ttk.Combobox(q, textvariable=tgt.cget("textvariable"), values=tgt.cget("values"),
                                         state="readonly", width=7)
-        self.home_target.grid(row=0, column=1, sticky="w", padx=(4, 8))
-        self._tx(ttk.Label(q), "gui_quick_other").grid(row=0, column=2, sticky="w")
+        self.home_target.grid(row=0, column=1, sticky="w", padx=(4, 8), pady=(0, 2))
+        self._tx(ttk.Label(q), "gui_quick_other").grid(row=1, column=0, sticky="w")  # own row: never wider than the window
         self.home_lang = ttk.Combobox(q, textvariable=self.v_lang, values=lang_labels(), state="readonly", width=7)
-        self.home_lang.grid(row=0, column=3, sticky="w", padx=(4, 0))
+        self.home_lang.grid(row=1, column=1, sticky="w", padx=(4, 8))
         q.columnconfigure(4, weight=1)  # spare width goes to the right, the pickers stay grouped at the left
         self.v_pair = tk.StringVar()  # #981: "same language" is said at once, before Start
         # #982: the inline error (v_pair only carries the state text)
         self.lang_err = self._tok(ttk.Label(q, wraplength=MAIN_W - 40, justify="left"), "err")
-        self.lang_err.grid(row=1, column=0, columnspan=4, sticky="w")
+        self.lang_err.grid(row=2, column=0, columnspan=4, sticky="w")
         self.ru_notice = ttk.Frame(q)  # lasting "Russian voice not downloaded" line + [Download]
         self.ru_notice_lbl = self._tok(ttk.Label(self.ru_notice), "warn")
         self.ru_notice_lbl.pack(side="left")
         self.ru_notice_btn = ttk.Button(self.ru_notice, command=self._ru_voice_ask)
         self.ru_notice_btn.pack(side="left", padx=(8, 0))
-        self.ru_notice.grid(row=2, column=0, columnspan=4, sticky="w")
+        self.ru_notice.grid(row=3, column=0, columnspan=4, sticky="w")
         self.ru_notice.grid_remove()
         for v in (self.v_lang, self.v_target):
             v.trace_add("write", lambda *_: self._pair_changed())
