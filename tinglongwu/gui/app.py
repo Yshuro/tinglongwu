@@ -33,6 +33,23 @@ except ImportError:  # pragma: no cover
 
 POLL_MS = 50
 UPDATE_CHECK_DELAY_MS = 5000
+def set_titlebar_dark(win, dark: bool) -> bool:
+    """#1662: dark (or light) OS title bar via DWMWA_USE_IMMERSIVE_DARK_MODE on the Toplevel's real HWND; Windows only."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+        val = ctypes.c_int(1 if dark else 0)
+        for attr in (20, 19):  # 19 on older Win10 builds
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(val), ctypes.sizeof(val)) == 0:
+                return True
+    except Exception:  # noqa: BLE001
+        _diag.swallowed(__name__)
+    return False
+
+
 def _mtime(p):
     """#1525: identity of the installed GPU pack folder (a replacement gets a new mtime); None when absent."""
     try:
@@ -690,6 +707,14 @@ class App:
             self.panel.configure(bg=pal["win"])
         except (tk.TclError, AttributeError):
             pass
+        dark = self.settings.get("theme") != "light"
+        for name in ("root", "panel", "topics_win"):
+            w = getattr(self, name, None)
+            try:
+                if w is not None and w.winfo_exists():
+                    set_titlebar_dark(w, dark)
+            except tk.TclError:
+                pass
         for name in ("menubar", "panel_menubar"):
             if getattr(self, name, None) is not None:
                 self._style_menu(getattr(self, name))
@@ -1391,6 +1416,10 @@ class App:
         """#982: My language == Other side language: inline error and Start disabled (home button and bar button)."""
         if getattr(self, "lang_err", None) is not None:
             self.lang_err.configure(text=t("gui_same_lang") if self.same_lang else "")
+            if self.same_lang:  # an empty error line is a ~20 px blank band, so it only takes space when it has text
+                self.lang_err.grid()
+            else:
+                self.lang_err.grid_remove()
         if hasattr(self, "btn"):
             self._sync_quick()
 
