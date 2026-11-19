@@ -41,6 +41,8 @@ DEFAULTS = {
     "speaker_id": False,  # 0.3.8: 標示說話者; off = sherpa-onnx and the speaker model are never loaded
     "topics": None,  # #611: topic notes side panel; None = default (on with CUDA, off on CPU-only), True/False = chosen
     "topics_model": "",  # #611: local GGUF for --topics; "" = the downloaded #1378 default (TOPICS_KEY), if installed
+    "gpu_use": "auto",  # #1531: Adjust > Advanced "Use GPU": auto (GPU when it works, else CPU) / off (always CPU)
+    "gpu_fallback": "",  # #1531: reason the first-start self-test fell back to CPU ("" = none); written by selftest.apply_to_gui
     "send_mode": "auto",  # #834/#1052: how a speak line is sent (auto = straight away, confirm = show me first); owner default: auto
 }
 SEND_MODES = ("confirm", "countdown", "auto")  # same choices as reverse.sendmode.MODES (the CLI keeps all three)
@@ -66,7 +68,7 @@ def send_mode_notice_key(mode: str) -> str | None:
     return "gui_send_mode_notice" if mode in ("countdown", "auto") else None
 # #983: settings the running pipeline reads only when it starts; changing one during a run needs a restart
 START_TIME_SETTINGS = ("lang", "target", "engine", "quality", "model", "preset", "glossary", "source", "voice",
-                       "voice_device", "send_mode", "listen_device", "mic_device")
+                       "voice_device", "send_mode", "listen_device", "mic_device", "gpu_use")
 
 
 def restart_needed(at_start: dict, now: dict) -> list[str]:
@@ -519,6 +521,8 @@ _CHOICES = {
                "ru": {"meeting": "Встреча (целые фразы)", "chat": "Чат (быстрее)"},
                "zh-TW": {"meeting": "會議（完整句子）", "chat": "聊天（較快）"},
                "ja": {"meeting": "会議（文単位）", "chat": "チャット（速め）"}},
+    "gpu_use": {"en": {"auto": "Auto", "off": "Off"}, "ru": {"auto": "Авто", "off": "Выкл."},
+                "zh-TW": {"auto": "自動", "off": "關閉"}, "ja": {"auto": "自動", "off": "オフ"}},  # #1531
     "engine": {"en": {"auto": "Auto"}, "ru": {"auto": "Авто"}, "zh-TW": {"auto": "自動"}, "ja": {"auto": "自動"}},
 }
 
@@ -1056,6 +1060,8 @@ def settings_to_argv(s: dict, outputs: list[str] | None = None, notice=None) -> 
         argv += ["--engine", engine, "--model", usable_model(s.get("model"))]
     else:  # the CLI picks engine + speech model from the hardware probe
         argv += ["--quality", quality]
+    if s.get("gpu_use") == "off":  # #1531: the manual switch, only under Advanced; auto = the CLI falls back to CPU itself
+        argv += ["--device", "cpu"]
     argv += ["--mt-pending"]  # #1375: Hy-MT2 still downloading -> source-text subtitles, translation switches on later
     if s.get("source") == "mic":
         argv += ["--mic"]

@@ -580,8 +580,15 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
             if merger is None or translator is None:
                 emit_units([Unit(t.text, t.lang, False, tag)])
                 continue
+            # #1562: the segment on the audio clock (a catch-up join starts at its first kept segment), so the
+            # late-fragment window is the pause in the audio, not ASR / queue delay
+            # (a budget cut's undecoded tail, queued in carry, is not part of this text)
+            a_start = join_start[0] if join_start[0] is not None else stamp - len(seg) / SAMPLE_RATE
+            cut_s = len(tail) / SAMPLE_RATE if tail is not None and len(tail) else 0.0
+            # a budget cut of a catch-up join (its gaps removed) cannot be mapped back to the audio clock: no span
+            span = None if cut_s and join_start[0] is not None else (a_start, stamp - cut_s)
             emit_units(merger.add(t.text, script_lang(t.text, t.lang), stamp if audio_clock else time.monotonic(),
-                                   forced_cut=forced_cut, pause=pause, tag=tag))
+                                   forced_cut=forced_cut, pause=pause, tag=tag, span=span))
         if merger is not None and translator is not None:
             emit_units(merger.flush())
         asr_over.set()
