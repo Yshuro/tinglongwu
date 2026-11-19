@@ -551,13 +551,13 @@ MESSAGES: dict[str, dict[str, str]] = {
         "gui_open_url": "Откройте этот адрес: {url}",
     },
     "zh-TW": {
-        "gui_topics_menu": "主題筆記...",  # #611
-        "gui_topics_title": "主題筆記",  # #611
+        "gui_topics_menu": "重點整理...",  # #611
+        "gui_topics_title": "重點整理",  # #611
         "gui_topics_model": "模型 (.gguf)...",  # #611
-        "gui_topics_no_model": "開啟「會議重點」即可下載重點模型，或自選一個 GGUF 模型。",  # #611
-        "gui_topics_switch": "會議重點",  # #1379
+        "gui_topics_no_model": "開啟「重點整理」即可下載重點模型，或自選一個 GGUF 模型。",  # #611
+        "gui_topics_switch": "重點整理",  # #1379
         "gui_topics_lang": "重點以你閱讀的語言撰寫：{lang}。",  # #1379
-        "gui_topics_cpu_off": "沒有偵測到 GPU：這台電腦預設不開會議重點。用 CPU 整理一段 5 分鐘的主題約需 4 分鐘，重點會在會議結束後才出來。可以接受的話再開啟。",  # #1379
+        "gui_topics_cpu_off": "沒有偵測到 GPU：這台電腦預設不開重點整理。用 CPU 整理一段 5 分鐘的主題約需 4 分鐘，重點會在會議結束後才出來。可以接受的話再開啟。",  # #1379
         "gui_topics_downloading": "正在下載重點模型（約 {mb} MB，只需一次）。之後可離線使用。",  # #1379
         "gui_topics_cancel": "取消下載",  # #1379
         "gui_topics_empty": "會議中每講完一個主題，就會出現在這裡。",  # #611
