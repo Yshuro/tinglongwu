@@ -2086,6 +2086,22 @@ class App:
                              spacing3=2, **base)
             tx.tag_configure(f"{side}_src", foreground=pal["sub"], font=(fam, small), **base)
         tx.tag_configure("hint", foreground=pal["sub"], font=(fam, small + 2), justify="center", spacing1=40)
+        self._topics_font(fam, n, small)
+
+    def _topics_font(self, fam=None, n=None, small=None):
+        """The key-points pane follows the subtitle font and size (family picker, log size)."""
+        tt = getattr(self, "topics_text", None)
+        try:
+            if tt is None or not tt.winfo_exists():
+                return
+            n = n or self.settings["log_font_size"]
+            fam = fam or self.settings.get("font_family") or FONT_FAMILY
+            small = small or max(8, n * 2 // 3)
+            tt.configure(font=(fam, n))
+            tt.tag_configure("title", font=(fam, n + 1, "bold"))
+            tt.tag_configure("when", font=(fam, small))
+        except Exception:  # noqa: BLE001 - cosmetic
+            pass
 
     def bump_log_font(self, d: int):
         follow = self._log_at_end()
@@ -2538,6 +2554,7 @@ class App:
             self.topics_text.tag_configure("title", font=("TkDefaultFont", 12, "bold"))
             self.topics_text.tag_configure("when", foreground="#7f8c8d")
             self.topics_text.pack(side="top", fill="both", expand=True)
+            self._topics_font()
             self.topics_text.bind("<Button-1>", lambda e: self.topics_text.focus_set(), add="+")
             self.topics_text.bind("<Control-c>", lambda e: (self._topics_copy(), "break")[1])
         from ..langs import name as lang_name
