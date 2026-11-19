@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from .paths import APP_ROOT
 
 _log = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ def _nvidia_wheel_dirs() -> list[Path]:
 
 def _bundled_dirs() -> list[Path]:
     """`cuda_libs/` next to the standalone build (tlwu.exe folder) that holds cuBLAS / cuDNN / cudart."""
-    d = Path(__file__).resolve().parent.parent / "cuda_libs"
+    d = APP_ROOT / "cuda_libs"
     from .gpu_pack import pack_dir  # the separately installed GPU pack (#613); absent -> CPU path
 
     return [x for x in ([d] if d.is_dir() else []) + [pack_dir()] if x is not None]
@@ -70,7 +71,7 @@ LLAMA_CUDA_DLLS = ("cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll", "n
 
 def bundled_llama_cpu_dir() -> Path | None:
     """`llama_cpp/lib_cpu/` of the standalone build: a CPU-only llama.cpp next to the CUDA one in llama_cpp/lib/."""
-    d = Path(__file__).resolve().parent.parent / "llama_cpp" / "lib_cpu"
+    d = APP_ROOT / "llama_cpp" / "lib_cpu"
     return d if (d / "llama.dll").is_file() else None
 
 
@@ -114,7 +115,7 @@ def pack_llama_dir(pack: Path | None = None, app_lib: Path | None = None) -> Pat
         pack = pack_dir()
     if pack is None:
         return None
-    lib = app_lib or Path(__file__).resolve().parent.parent / "llama_cpp" / "lib"
+    lib = app_lib or APP_ROOT / "llama_cpp" / "lib"
     if (lib / "ggml-cuda.dll").is_file():
         return None
     if not all((pack / n).is_file() for n in ("llama.dll", "ggml.dll", "ggml-cuda.dll")):

@@ -11,6 +11,7 @@ import ctypes
 import os
 import sys
 from pathlib import Path
+from .paths import APP_ROOT
 
 BACKENDS = ("cuda", "vulkan", "cpu")
 VULKAN_PACK_NAME = "vulkan-pack"
@@ -24,7 +25,7 @@ def vulkan_pack_dir(base: Path | None = None, warn=None) -> Path | None:
     """Installed Vulkan llama.cpp pack folder (has a llama library), else None. Env TLWU_VULKAN_PACK moves it.
     A pack whose version.txt is missing or differs from the app version is stale (#909): None, one warning line."""
     d = base or (Path(os.environ["TLWU_VULKAN_PACK"]) if os.environ.get("TLWU_VULKAN_PACK")
-                 else Path(__file__).resolve().parent.parent / VULKAN_PACK_NAME)
+                 else APP_ROOT / VULKAN_PACK_NAME)
     try:
         if d.is_dir() and (any(d.glob("llama.*")) or any(d.glob("libllama.*"))):
             from . import __version__

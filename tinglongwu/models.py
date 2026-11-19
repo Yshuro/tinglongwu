@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from .paths import APP_ROOT
 
 
 class ModelNotFound(RuntimeError):
@@ -18,7 +19,7 @@ def models_dir(arg: str | None = None) -> Path:
     if os.environ.get("TLWU_BUNDLED") == "1" or getattr(sys, "frozen", False):  # #967: same as tinglongwu_setup
         base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".local", "share")
         return Path(base) / "tinglongwu" / "models"
-    return Path(__file__).resolve().parent.parent / "models"
+    return APP_ROOT / "models"
 
 
 VOSK_TTS_RU_DIR = "vosk-model-tts-ru-0.7-multi"  # OPT-IN (tlwu-setup --vosk-tts-ru); keep in sync with tinglongwu_setup

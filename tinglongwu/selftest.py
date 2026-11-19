@@ -13,10 +13,11 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from .paths import DATA_DIR
 
 from . import userdirs
 
-CLIP = Path(__file__).resolve().parent / "data" / "selftest_en.wav"
+CLIP = DATA_DIR / "selftest_en.wav"
 CLIP_TEXT = "Hello, this is a test of the translation system. The weather is nice today."
 CPU_WHISPER = ("small", "base", "tiny")  # usable in real time without a GPU
 LOG_NAME = "install.log"

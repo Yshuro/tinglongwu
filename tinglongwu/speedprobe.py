@@ -19,6 +19,7 @@ import statistics
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
+from .paths import DATA_DIR
 
 from .hwprobe import HwInfo, Tier
 
@@ -34,7 +35,7 @@ HYMT_CPU_EXCLUDED_KEY = "hymt2 (CPU)"
 ASR_CPU_MAX_RTF = 0.5
 ASR_BUDGET_S = 12.0  # stop timing smaller speech models after this (one clip per model, like BUDGET_S for MT)
 CPU_ASR_STEPS = ("large-v3-turbo", "medium", "small", "base", "tiny")  # largest first; only steps down from the tier
-CLIP = Path(__file__).resolve().parent / "data" / "selftest_en.wav"
+CLIP = DATA_DIR / "selftest_en.wav"
 _clock = time.perf_counter
 
 # Ordinary meeting-style sentences, 9-17 words: the length the live pipeline sends per segment.

@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from .paths import DATA_DIR
 from collections.abc import Callable
 
 HOTWORDS_MAX_CHARS = 200  # Whisper prompt budget: hotwords + previous text must stay far below 224 tokens
@@ -231,8 +232,8 @@ def load(path) -> Glossary:
     return Glossary(entries)
 
 
-BUILTIN_PATH = Path(__file__).parent / "data" / "tech-dev.txt"
-BUILTIN_RU_PATH = Path(__file__).parent / "data" / "tech-ru.txt"
+BUILTIN_PATH = DATA_DIR / "tech-dev.txt"
+BUILTIN_RU_PATH = DATA_DIR / "tech-ru.txt"
 
 
 def load_builtin(lang: str | None = None) -> Glossary:
@@ -252,7 +253,7 @@ def load_builtin(lang: str | None = None) -> Glossary:
     return g
 
 
-DEFAULT_HOTWORDS = {"ru": Path(__file__).parent / "data" / "hotwords-ru.txt"}  # #1397, per source language
+DEFAULT_HOTWORDS = {"ru": DATA_DIR / "hotwords-ru.txt"}  # #1397, per source language
 # Languages whose default list is on without the env switch (scripts/bench/acronym_eval.py decides). ru shipped by
 # eval-terms run 44084227768 (#1409): acronym accuracy 71.0% -> 86.8% (38 clips), false insertions 1 -> 1 (12
 # distractors), standard ru set (20 FLEURS clips) WER 7.7% -> 7.4%.
