@@ -61,8 +61,14 @@ BAR_WIDE_PX = 1200  # #1241: from this bar width the 情境 dropdown and the tog
 BAR_ONE_ROW_PX = 1200  # the whole bottom bar (情境, toggles, Adjust / Freeze / Start) on one row from this width
 MAIN_W, MAIN_H, MAIN_MIN_W, MAIN_MIN_H = 460, 640, 380, 480  # #1028: the chat-style main window
 # chat bubbles (#1028): other side on the left, me on the right; (bubble background, text) per theme
-BUBBLE = {"dark": {"bg": "#14182e", "other": ("#2b3250", "#f2f4ff"), "me": ("#3f5fe0", "#ffffff"), "sub": "#9aa3c7", "head": "#9aa3c7"},
-          "light": {"bg": "#ffffff", "other": ("#e6e9f5", "#1d2447"), "me": ("#cfe0ff", "#10224d"), "sub": "#5b6390", "head": "#5b6390"}}
+# #1644: "latest" = the newest finished line from the other side (brighter, so the eye lands on it first)
+BUBBLE = {"dark": {"bg": "#151824", "other": ("#1c2030", "#e3e6ee"), "me": ("#3f5fe0", "#ffffff"),
+                   "latest": ("#2a3560", "#ffffff"), "sub": "#8d95a8", "head": "#8d95a8"},
+          "light": {"bg": "#ffffff", "other": ("#e6e9f5", "#1d2447"), "me": ("#cfe0ff", "#10224d"),
+                    "latest": ("#cdd6ff", "#10224d"), "sub": "#5b6390", "head": "#5b6390"}}
+# #1644: notes (重點整理) window per theme: time range muted, bullets in the notes accent (violet)
+NOTES = {"dark": {"bg": "#151824", "fg": "#e3e6ee", "title": "#ffffff", "when": "#8d95a8", "mark": "#b79cff"},
+         "light": {"bg": "#ffffff", "fg": "#1d2447", "title": "#10224d", "when": "#5b6390", "mark": "#6b4fd8"}}
 FG_FINAL, FG_DRAFT, FG_SRC, BG = "#ffffff", "#8a8a8a", "#b8c4d6", "#101010"
 FONT_FAMILY = "Microsoft JhengHei UI" if sys.platform == "win32" else "TkDefaultFont"
 # settings-panel sidebar: dragon logo on a lapis-blue -> lavender gradient (mascot palette), nav drawn on the canvas
@@ -626,10 +632,22 @@ class App:
             st.configure(style, padding=(4, 1))
         st.configure("Adv.Toolbutton", anchor="w", padding=(8, 2))
         st.configure("Start.Accent.TButton", font=(FONT_FAMILY, 13, "bold"), padding=(14, 8))  # #1028: the big Start
-        if getattr(self, "log_text", None) is not None:
-            self._chat_tags()
+        self._retint()
+        if sv_ttk is not None and not getattr(self, "_retint_bound", False):
+            # #1644: sv_ttk recolours every tk widget on <<ThemeChanged>> (tk_setPalette), after this method has
+            # returned, and that wiped the chat / notes background; paint ours again once it is done
+            self._retint_bound = True
+            self.root.bind("<<ThemeChanged>>",
+                           lambda e: self.root.after_idle(self._retint) if e.widget is self.root else None, add="+")
         if getattr(self, "side", None) is not None:
             self._draw_sidebar()
+
+    def _retint(self):
+        """Our own colours on the plain tk.Text widgets (chat log, notes window) for the current theme."""
+        if getattr(self, "log_text", None) is not None:
+            self._chat_tags()
+        if getattr(self, "topics_win", None) is not None and self.topics_win.winfo_exists():
+            self._notes_tags()
 
     # -- settings-panel sidebar (logo + nav), drawn on one canvas so it adds no interactive widgets ------------------
     def _build_sidebar(self, p):
@@ -2098,6 +2116,9 @@ class App:
                              spacing3=2, **base)
             tx.tag_configure(f"{side}_src", foreground=pal["sub"], font=(fam, small), **base)
         tx.tag_configure("hint", foreground=pal["sub"], font=(fam, small + 2), justify="center", spacing1=40)
+        lbg, lfg = pal["latest"]  # #1644: laid over other_final on the newest line, so it must win
+        tx.tag_configure("other_latest", background=lbg, foreground=lfg)
+        tx.tag_raise("other_latest")
         self._topics_font(fam, n, small)
 
     def _topics_font(self, fam=None, n=None, small=None):
@@ -2146,7 +2167,9 @@ class App:
         tx.delete("1.0", "end")
         if not hist:
             ph = self.placeholder()
-            tx.insert("end", ph[0][0] if ph else t("gui_chat_empty"), "hint")
+            tx.insert("end", ph[0][0] if ph else self._empty_hint(), "hint")
+        newest = max((i for i, (s, x, d) in enumerate(hist)  # #1644: newest finished line of the other side
+                      if not d and not (x.startswith(SPEAK_MARK) or s.startswith(SPEAK_MARK))), default=-1)
         for i, (src, text, is_draft) in enumerate(hist):
             mine = text.startswith(SPEAK_MARK) or src.startswith(SPEAK_MARK)  # #1001: speak-leg lines are mine
             side = "me" if mine else "other"
@@ -2163,7 +2186,7 @@ class App:
                 tx.insert("end", shown, (f"{side}_head", tag))
                 tx.insert("end", "\n", f"{side}_head")
                 tx.tag_configure(av, background=color, foreground=SPK_AVATAR_FG)
-                tx.tag_configure(tag, underline=True, foreground=color)
+                tx.tag_configure(tag, foreground=color)  # #1644: no underline; the hand cursor marks the link
                 if tag not in self._spk_tags_bound:  # bind once per tag: every bind leaks a Tcl command
                     self._spk_tags_bound.add(tag)
                     tx.tag_bind(tag, "<Button-1>", lambda _e, r=raw: self._rename_speaker(r))
@@ -2171,14 +2194,21 @@ class App:
                     tx.tag_bind(tag, "<Leave>", lambda _e: tx.configure(cursor=""))
             else:
                 tx.insert("end", head + "\n", f"{side}_head")
-            self._insert_bubble(side, text, is_draft, i)
-            if show_src and src and src != text:
+            if show_src and src and src != text:  # #1605: source small first, translation large under it
                 tx.insert("end", src + "\n", (f"{side}_src", f"row{i}"))
+            self._insert_bubble(side, text, is_draft, i, latest=i == newest)
         tx.configure(state="disabled")
         if follow:
             self._log_to_end()
         else:
             tx.yview(top)
+
+    def _empty_hint(self) -> str:
+        """#1605: the empty subtitle area names the current source and target language."""
+        from .. import langs
+
+        src, dst = self._home_pair()
+        return t("gui_chat_hint", src=langs.plain_label(src, ui_lang()), dst=choice_label("target", dst))
 
     def _speaker_label(self, row: int):
         """0.3.8: (raw label, text to show) of history row `row`, or None (no speaker ID / not ready / mine)."""
@@ -2271,7 +2301,7 @@ class App:
 
         threading.Thread(target=attach, daemon=True, name="tlwu-speaker-attach").start()
 
-    def _insert_bubble(self, side: str, text: str, is_draft: bool, row: int):
+    def _insert_bubble(self, side: str, text: str, is_draft: bool, row: int, latest: bool = False):
         """#1070: a bubble hugs its text (max ~75 % of the window). Tk paints the margin area with the background of the
         line's first character, so the text is wrapped here and every line starts with a plain spacer (no
         background) that carries the margin; the background tag covers only the words."""
@@ -2294,9 +2324,10 @@ class App:
         mtag = f"{side}_m{margin}"
         tx.tag_configure(mtag, lmargin1=margin, lmargin2=margin, rmargin=0, justify="left")
         fin = f"{side}_draft" if is_draft else f"{side}_final"
+        words = (fin, "other_latest", f"row{row}") if latest else (fin, f"row{row}")
         for ln in lines:
             tx.insert("end", " ", (mtag, f"row{row}"))
-            tx.insert("end", f" {ln} ", (fin, f"row{row}"))
+            tx.insert("end", f" {ln} ", words)
             tx.insert("end", chr(10), (mtag, f"row{row}"))
 
     def _sync_bar(self):
@@ -2563,12 +2594,11 @@ class App:
             self.topics_busy = ttk.Label(w, foreground="#2e86de")  # the model can take a minute: show it is working
             self.topics_busy.pack(side="top", fill="x", padx=8)
             self.topics_text = tk.Text(w, wrap="word", height=20, borderwidth=0, padx=8, pady=6)
-            self.topics_text.tag_configure("title", font=("TkDefaultFont", 12, "bold"))
-            self.topics_text.tag_configure("when", foreground="#7f8c8d")
             self.topics_text.pack(side="top", fill="both", expand=True)
             self._topics_font()
             self.topics_text.bind("<Button-1>", lambda e: self.topics_text.focus_set(), add="+")
             self.topics_text.bind("<Control-c>", lambda e: (self._topics_copy(), "break")[1])
+        self._notes_tags()
         from ..langs import name as lang_name
         from .core import TOPICS_MB, _gpu_usable
         from .topics_panel import panel_hint
@@ -2592,7 +2622,8 @@ class App:
             tx.insert("end", ("\u25be " if i in opened else "\u25b8 ") + e["title"], ("title", f"t{i}"))
             tx.insert("end", "  " + e["when"] + "\n", "when")
             for b in e["bullets"]:
-                tx.insert("end", f"\u2022 {b}\n", ("bullet", f"b{i}"))
+                tx.insert("end", "\u2022", ("mark", "bullet", f"b{i}"))
+                tx.insert("end", f" {b}\n", ("bullet", f"b{i}"))
             tx.tag_configure(f"b{i}", elide=i not in opened)  # collapsed: titles only; click a title to read its points
             tx.tag_bind(f"t{i}", "<Button-1>", lambda _e, i=i: self._topic_toggle(i))
             tx.tag_bind(f"t{i}", "<Enter>", lambda _e: tx.configure(cursor="hand2"))
@@ -2641,6 +2672,15 @@ class App:
         else:
             self._topics_closed = False
             self.render_topics(show=True)
+
+    def _notes_tags(self):
+        """#1644: the notes text follows the app theme; time range muted, bullet marks in the notes accent."""
+        pal = NOTES["light" if self.settings.get("theme") == "light" else "dark"]
+        tx = self.topics_text
+        tx.configure(bg=pal["bg"], fg=pal["fg"], insertbackground=pal["fg"])
+        tx.tag_configure("title", foreground=pal["title"])
+        tx.tag_configure("when", foreground=pal["when"])
+        tx.tag_configure("mark", foreground=pal["mark"])
 
     def _topics_var(self):
         """#1379: one BooleanVar for the Settings menu switch and the panel's switch."""
