@@ -422,6 +422,41 @@ def _nvml_gpu_percent():
     return int(u.gpu)
 
 
+DOCK_W = 320  # width the window grows by when the meeting-notes pane docks on the right
+
+
+class _DockPane(ttk.Frame):
+    """The meeting-notes pane, docked to the right of the subtitle log (was a floating Toplevel). It keeps the
+    withdraw/deiconify surface of the old window so callers and tests stay the same."""
+
+    def __init__(self, app, holder, before):
+        super().__init__(holder, width=DOCK_W)
+        self._app, self._before, self._grew = app, before, 0
+
+    def deiconify(self):
+        if not self.winfo_manager():
+            self.pack(side="right", fill="y", padx=(6, 0), before=self._before)
+            self.pack_propagate(False)
+            root = self._app.root
+            try:
+                root.update_idletasks()
+                if root.winfo_width() < 800 and root.winfo_screenwidth() > root.winfo_width() + DOCK_W + 40:
+                    self._grew = DOCK_W
+                    root.geometry(f"{root.winfo_width() + DOCK_W}x{root.winfo_height()}")
+            except Exception:  # noqa: BLE001
+                self._grew = 0
+
+    def withdraw(self):
+        self.pack_forget()
+        root = self._app.root
+        if self._grew:
+            try:
+                root.geometry(f"{max(MAIN_MIN_W, root.winfo_width() - self._grew)}x{root.winfo_height()}")
+            except Exception:  # noqa: BLE001
+                pass
+            self._grew = 0
+
+
 def _system_cpu_percent(app):
     """Busy share of all CPUs since the previous call, in percent, or None (not Windows / first call / error)."""
     if sys.platform != "win32":
@@ -1742,7 +1777,7 @@ class App:
         sm.add_command(label=t("gui_menu_usage"), command=self.ask_usage)  # #680
         sm.add_checkbutton(label=t("gui_topics_switch"), variable=self._topics_var(),  # #1379: the one switch
                            command=self._topics_toggled)
-        sm.add_command(label=t("gui_topics_menu"), command=lambda: self.render_topics(show=True))  # #611
+        sm.add_command(label=t("gui_topics_menu"), command=self._topics_toggle)  # #611
         sm.configure(postcommand=self._sync_topics_var)  # #1379: the check mark follows the GPU default
         mb.add_cascade(label=t("gui_menu_settings"), menu=sm)
         hm = tk.Menu(mb, tearoff=0)
@@ -1960,13 +1995,14 @@ class App:
         # main-screen shortcuts: the things you need mid-meeting (they used to sit under Adjust > Advanced)
         ttk.Checkbutton(bar, text=t("gui_save"), variable=self.v_save).pack(side="left")
         ttk.Button(bar, text=t("gui_copy_all"), command=lambda: self._log_copy(True)).pack(side="left", padx=(6, 0))
-        ttk.Button(bar, text=t("gui_topics_menu"), command=lambda: self.render_topics(show=True)).pack(side="left", padx=(6, 0))
+        ttk.Button(bar, text=t("gui_topics_menu"), command=self._topics_toggle).pack(side="left", padx=(6, 0))
         self.lbl_cpu = ttk.Label(bar, text="")
         self.lbl_cpu.pack(side="left", padx=(10, 0))
         self._cpu_prev = None
         self._cpu_poll()
         box = tk.Frame(f)
         box.pack(side="top", fill="both", expand=True)
+        self._log_holder, self._log_box = box, box
         sb = ttk.Scrollbar(box, orient="vertical")
         self.log_text = tx = tk.Text(box, bd=0, highlightthickness=0, wrap="word", padx=4, pady=6, cursor="arrow",
                                      takefocus=0, yscrollcommand=sb.set, width=1, height=1)
@@ -2462,21 +2498,22 @@ class App:
         if w is None or not w.winfo_exists():
             if not show:
                 return
-            w = self.topics_win = tk.Toplevel(self.root)
-            w.title(t("gui_topics_title"))
-            w.geometry("360x480")
-            w.protocol("WM_DELETE_WINDOW", w.withdraw)
+            holder = self._log_holder
+            inner = [c for c in holder.winfo_children() if isinstance(c, tk.Text) or isinstance(c, ttk.Scrollbar)]
+            w = self.topics_win = _DockPane(self, holder, before=inner[0] if inner else None)
+            ttk.Label(w, text=t("gui_topics_title"), font=("TkDefaultFont", 11, "bold")).pack(side="top", anchor="w", padx=8, pady=(4, 0))
             bar = ttk.Frame(w)
             bar.pack(side="top", fill="x", padx=8, pady=6)
             self._sync_topics_var()
             ttk.Checkbutton(bar, text=t("gui_topics_switch"), variable=self._topics_var(),
                             command=self._topics_toggled).pack(side="left")
-            ttk.Button(bar, text=t("gui_topics_model"), command=self.pick_topics_model).pack(side="right")
+            ttk.Button(bar, text="✕", width=3, command=self._topics_close).pack(side="right")
+            ttk.Button(bar, text=t("gui_topics_model"), command=self.pick_topics_model).pack(side="right", padx=(0, 6))
             ttk.Button(bar, text=t("gui_log_copy"), command=self._topics_copy).pack(side="right", padx=(0, 6))
             self.topics_cancel = ttk.Button(bar, text=t("gui_topics_cancel"), command=self._cancel_topics_download)
-            self.topics_lang = ttk.Label(w, wraplength=340, justify="left")  # #1379: which language the notes use
+            self.topics_lang = ttk.Label(w, wraplength=DOCK_W - 30, justify="left")  # #1379: which language the notes use
             self.topics_lang.pack(side="top", fill="x", padx=8)
-            self.topics_hint = ttk.Label(w, wraplength=340, justify="left", foreground="#7f8c8d")
+            self.topics_hint = ttk.Label(w, wraplength=DOCK_W - 30, justify="left", foreground="#7f8c8d")
             self.topics_hint.pack(side="top", fill="x", padx=8)
             self.topics_text = tk.Text(w, wrap="word", height=20, borderwidth=0, padx=8, pady=6)
             self.topics_text.tag_configure("title", font=("TkDefaultFont", 12, "bold"))
@@ -2510,9 +2547,25 @@ class App:
                 tx.insert("end", f"\u2192 {a}\n")
             tx.insert("end", "\n")
         tx.configure(state="disabled")
-        if show:
+        if show and not self._topics_closed:
             w.deiconify()
             w.lift()
+
+    _topics_closed = False
+
+    def _topics_close(self):
+        self._topics_closed = True
+        if self.topics_win is not None:
+            self.topics_win.withdraw()
+
+    def _topics_toggle(self):
+        """The toolbar button: show the pane, or hide it when it is already there."""
+        w = self.topics_win
+        if w is not None and w.winfo_exists() and w.winfo_manager():
+            self._topics_close()
+        else:
+            self._topics_closed = False
+            self.render_topics(show=True)
 
     def _topics_var(self):
         """#1379: one BooleanVar for the Settings menu switch and the panel's switch."""
