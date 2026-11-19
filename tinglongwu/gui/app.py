@@ -58,6 +58,7 @@ FONT_MENU_SIZES = tuple(range(FONT_MIN, FONT_MAX + 1, 4))  # #738: Settings > Fo
 UI_LANGS = {"繁體中文": "zh-TW", "English": "en", "Русский": "ru", "日本語": "ja"}
 STATUS_WRAP_MIN_PX = 200  # #1241: status / notice wrap at the panel width, never narrower than this
 BAR_WIDE_PX = 1200  # #1241: from this bar width the 情境 dropdown and the toggles share one row
+BAR_ONE_ROW_PX = 1200  # the whole bottom bar (情境, toggles, Adjust / Freeze / Start) on one row from this width
 MAIN_W, MAIN_H, MAIN_MIN_W, MAIN_MIN_H = 460, 640, 380, 480  # #1028: the chat-style main window
 # chat bubbles (#1028): other side on the left, me on the right; (bubble background, text) per theme
 BUBBLE = {"dark": {"bg": "#14182e", "other": ("#2b3250", "#f2f4ff"), "me": ("#3f5fe0", "#ffffff"), "sub": "#9aa3c7", "head": "#9aa3c7"},
@@ -1091,10 +1092,16 @@ class App:
         """#1241: >= BAR_WIDE_PX the 情境 row and the toggles share one row (a wide window had them stacked at the
         left with the right side empty); narrower, they stack. The action row (Adjust / Freeze / Start) spans both."""
         wide = int(width) >= BAR_WIDE_PX
-        if wide == self.bar_wide:
+        one_row = int(width) >= BAR_ONE_ROW_PX  # wide enough: scene, toggles and Adjust / Freeze / Start on ONE row
+        if (wide, one_row) == self.bar_wide:
             return
-        self.bar_wide = wide
-        if wide:
+        self.bar_wide = (wide, one_row)
+        if one_row:
+            self.scene_row.grid(row=0, column=0, columnspan=1, sticky="w", pady=0, padx=(0, 24))
+            self.toggle_row.grid(row=0, column=1, columnspan=1, sticky="w", pady=0)
+            self.action_row.grid(row=0, column=2, columnspan=1, sticky="e", pady=0)
+            self.source_row.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        elif wide:
             self.scene_row.grid(row=0, column=0, columnspan=1, sticky="w", pady=0, padx=(0, 24))
             self.toggle_row.grid(row=0, column=1, columnspan=1, sticky="w", pady=0)
             self.source_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
