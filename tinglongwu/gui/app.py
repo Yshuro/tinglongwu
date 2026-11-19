@@ -609,6 +609,7 @@ class App:
         self._pair_changed()
         self.overlay.build_menu()
         self.log_menu.entryconfigure(0, label=t("gui_menu_wrong_line"))
+        self.log_menu.entryconfigure(1, label=t("gui_menu_copy"))
         self.build_menubar()
         self._upd_relabel()
         self._draw_sidebar()
@@ -1861,7 +1862,12 @@ class App:
         tx.configure(state="disabled")
         self.log_menu = tk.Menu(tx, tearoff=0)
         self.log_menu.add_command(label=t("gui_menu_wrong_line"), command=self.report_wrong_line)
+        self.log_menu.add_command(label=t("gui_menu_copy"), command=self._log_copy)
         tx.bind("<Button-3>", self._log_context)
+        # the log is a disabled Text that never takes focus -> Ctrl+C had nothing to act on; take focus on click
+        tx.bind("<Button-1>", lambda e: tx.focus_set(), add="+")
+        tx.bind("<Control-c>", lambda e: (self._log_copy(), "break")[1])
+        tx.bind("<Control-a>", lambda e: (tx.tag_add("sel", "1.0", "end-1c"), "break")[1])
         tx.bind("<Configure>", self._log_resized)
         tx.bind("<Control-MouseWheel>", lambda e: self.bump_log_font(2 if e.delta > 0 else -2))
         tx.bind("<Control-Button-4>", lambda e: self.bump_log_font(2))
@@ -2895,8 +2901,20 @@ class App:
             m = re.fullmatch(r"row(\d+)", name)
             if m and int(m.group(1)) < len(rows):
                 self._log_row = rows[int(m.group(1))]
-        if self._log_row is not None and not self._log_row[2]:
-            self.log_menu.tk_popup(event.x_root, event.y_root)
+        can_report = self._log_row is not None and not self._log_row[2]
+        self.log_menu.entryconfigure(0, state="normal" if can_report else "disabled")
+        self.log_menu.tk_popup(event.x_root, event.y_root)
+
+    def _log_copy(self):
+        """Copy the selected log text (or the whole log if nothing is selected) to the clipboard."""
+        tx = self.log_text
+        try:
+            txt = tx.get("sel.first", "sel.last")
+        except tk.TclError:
+            txt = tx.get("1.0", "end-1c")
+        if txt:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(txt)
 
     def report_wrong_line(self):
         row = getattr(self, "_log_row", None)
