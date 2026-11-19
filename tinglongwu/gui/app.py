@@ -393,6 +393,35 @@ class Tour:
         self.visible = False
 
 
+_NVML = {}
+
+
+def _nvml_gpu_percent():
+    """GPU 0 busy % via the driver's own nvml library (ctypes, no subprocess, no extra package); None when absent."""
+    import ctypes
+    if "h" not in _NVML:
+        _NVML["h"] = None
+        try:
+            lib = ctypes.CDLL("nvml.dll" if os.name == "nt" else "libnvidia-ml.so.1")
+            if lib.nvmlInit_v2() == 0:
+                dev = ctypes.c_void_p()
+                if lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(dev)) == 0:
+                    _NVML["h"] = (lib, dev)
+        except Exception:  # noqa: BLE001
+            pass
+    if not _NVML["h"]:
+        return None
+    lib, dev = _NVML["h"]
+
+    class _Util(ctypes.Structure):
+        _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
+
+    u = _Util()
+    if lib.nvmlDeviceGetUtilizationRates(dev, ctypes.byref(u)) != 0:
+        return None
+    return int(u.gpu)
+
+
 def _system_cpu_percent(app):
     """Busy share of all CPUs since the previous call, in percent, or None (not Windows / first call / error)."""
     if sys.platform != "win32":
@@ -1893,8 +1922,10 @@ class App:
                     self._gpu_ok = False
             on_gpu = self._gpu_ok and self.settings.get("gpu_use") != "off"
             mode = t("gui_mode_gpu" if on_gpu else "gui_mode_cpu")
+            gp = _nvml_gpu_percent() if self._gpu_ok else None
             if pct is not None:
-                self.lbl_cpu.configure(text=mode + "  " + t("gui_cpu", p=pct), foreground="#c0392b" if pct >= 85 else "")
+                txt = mode + "  " + t("gui_cpu", p=pct) + ("" if gp is None else "  GPU %d%%" % gp)
+                self.lbl_cpu.configure(text=txt, foreground="#c0392b" if max(pct, gp or 0) >= 85 else "")
             elif not self.lbl_cpu.cget("text"):
                 self.lbl_cpu.configure(text=mode)
             self.root.after(2000, self._cpu_poll)
@@ -1918,6 +1949,14 @@ class App:
         fcb = ttk.Combobox(bar, textvariable=self.v_family, values=[self._font_default] + fams, width=14, state="readonly")
         fcb.pack(side="right", padx=(0, 6))
         fcb.bind("<<ComboboxSelected>>", self._font_picked)
+
+        def _font_refresh(cb=fcb):  # re-read the system list each time the dropdown opens (new installs show up)
+            try:
+                fl = sorted({x for x in tkfont.families(self.root) if not x.startswith("@")}, key=str.lower)
+                cb.configure(values=[self._font_default] + fl)
+            except Exception:  # noqa: BLE001
+                pass
+        fcb.configure(postcommand=_font_refresh)
         # main-screen shortcuts: the things you need mid-meeting (they used to sit under Adjust > Advanced)
         ttk.Checkbutton(bar, text=t("gui_save"), variable=self.v_save).pack(side="left")
         ttk.Button(bar, text=t("gui_copy_all"), command=lambda: self._log_copy(True)).pack(side="left", padx=(6, 0))
