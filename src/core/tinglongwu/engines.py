@@ -90,11 +90,11 @@ def load_llama(path: Path, gpu: bool):
 
     A build compiled for instructions this CPU lacks (issue #74: AVX-512 wheel on an AVX2 CPU) raises
     llamacheck.LlamaBuildError with the fix, instead of a bare 'Windows Error 0xc000001d'."""
-    from . import llamacheck, mt_backend
+    from . import llamacheck, mt_backend, vulkan_probe
     from . import threads as thread_budget
 
     pack = mt_backend.vulkan_pack_dir()
-    vulkan = mt_backend.vulkan_available()
+    vulkan = mt_backend.vulkan_available() and vulkan_probe.vulkan_allowed()  # #1773: CPU won the speed check
     why = mt_backend.forced_vulkan_unavailable(pack)  # #1774: TLWU_DEVICE=vulkan but no pack / loader: say why
     if why:
         print(fallback_line(why), file=sys.stderr)
