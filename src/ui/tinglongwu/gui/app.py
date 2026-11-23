@@ -1696,7 +1696,10 @@ class App:
 
             nvidia_seen()
             if probe:
-                self.q.put(("gpu_state", self._gpu_detect()))
+                st = self._gpu_detect()
+                self.q.put(("gpu_state", st))
+                if st == gpu_offer.UNAVAILABLE:  # #1775: no NVIDIA pack to offer -> maybe the Vulkan pack (AMD / Intel)
+                    self.q.put(("gpu_vk_state", self._vk_detect()))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -1708,6 +1711,15 @@ class App:
             return gpu_offer.detect()
         except Exception:  # noqa: BLE001 - no probe: no banner
             return gpu_offer.UNAVAILABLE
+
+    @staticmethod
+    def _vk_detect() -> str:
+        from . import vulkan_offer
+
+        try:
+            return vulkan_offer.detect()
+        except Exception:  # noqa: BLE001 - no probe: no banner
+            return vulkan_offer.UNAVAILABLE
 
     def _gpu_show(self, text: str, buttons: bool, busy: bool = False):
         self.v_gpu.set(text)
@@ -1735,16 +1747,37 @@ class App:
         self._gpu_show(t("gpu_offer_banner", size=gpu_offer.GPU_PACK_SIZE), buttons=True)
 
     def _gpu_never(self):
-        from . import gpu_offer
+        from . import gpu_offer, vulkan_offer
 
-        self.settings[gpu_offer.DISMISS_KEY] = True
+        self.settings[vulkan_offer.DISMISS_KEY if getattr(self, "gpu_vk", False) else gpu_offer.DISMISS_KEY] = True
         save_settings(self.settings)
         self._gpu_hide()
+
+    def _vk_install(self):
+        """#1775: one click = Vulkan pack + whisper.cpp model + probe (vulkan_offer.install_cmds / run_install)."""
+        from . import vulkan_offer
+        from .core import run_pack_download
+
+        if self.gpu_busy or vulkan_offer.INSTALLING.is_set():
+            return
+        vulkan_offer.INSTALLING.set()
+        self.gpu_busy, self.gpu_lines = True, []
+        self._gpu_show(t("vk_offer_running"), buttons=False, busy=True)
+        put = lambda ev: self.q.put(("gpu_" + ev[0], *ev[1:]))  # noqa: E731
+        try:
+            threading.Thread(target=vulkan_offer.run_install, args=(run_pack_download, put, vulkan_offer.install_cmds()),
+                             daemon=True).start()
+        except RuntimeError:
+            vulkan_offer.INSTALLING.clear()
+            self.gpu_busy = False
+            self._gpu_show(t("vk_offer_banner"), buttons=True)
 
     def _gpu_install(self):
         from . import gpu_offer
         from .core import run_pack_download
 
+        if getattr(self, "gpu_vk", False):
+            return self._vk_install()
         if self.gpu_busy or gpu_offer.INSTALLING.is_set() or gpu_offer.offline():
             return
         from ..gpu_pack import pack_dir
@@ -1775,11 +1808,21 @@ class App:
             if not self.gpu_busy and gpu_offer.should_offer(ev[1], gpu_offer.cpu_mode(), bool(self.settings.get(gpu_offer.DISMISS_KEY)),
                                       gpu_offer.offline()):
                 self._gpu_offer_show()
+        elif kind == "gpu_vk_state":
+            from . import vulkan_offer
+
+            if not self.gpu_busy and vulkan_offer.should_offer(ev[1], False, bool(self.settings.get(vulkan_offer.DISMISS_KEY)),
+                                                               gpu_offer.offline()):
+                self.gpu_vk = True
+                self._gpu_show(t("vk_offer_banner"), buttons=True)
         elif kind == "gpu_pack_line":
             self.gpu_lines = [*self.gpu_lines[-20:], ev[1]]
         elif kind == "gpu_pack_done":
             self.gpu_busy = False
-            if gpu_offer.install_ok(ev[2], self.gpu_lines):
+            if getattr(self, "gpu_vk", False):  # #1775: the Vulkan pack has its own wording (no CUDA restart notice)
+                self._gpu_show(t("vk_offer_ok") if ev[2] == 0 else t("vk_offer_fail", reason=gpu_offer.fail_reason(self.gpu_lines)),
+                               buttons=False)
+            elif gpu_offer.install_ok(ev[2], self.gpu_lines):
                 self.gpu_runtime_failed = False  # a fresh pack replaced the one that failed to load
                 self._gpu_show(t("gpu_offer_ok"), buttons=False)
             else:
@@ -1823,9 +1866,9 @@ class App:
         return True
 
     def _auto_update_check(self):
-        if not autoupdate.is_wizard_install():
+        if not autoupdate.can_update():
             return
-        if self._apply_pending_update():
+        if autoupdate.is_wizard_install() and self._apply_pending_update():
             return
         if autoupdate.should_auto_check(userdirs.read_config()):
             autoupdate.mark_checked()
@@ -1840,6 +1883,9 @@ class App:
         self.upd_busy = True
         if manual:
             self.set_status("gui_checking")
+        if autoupdate.is_git_checkout():  # #1672: Linux / git-checkout macOS follow auto_update.sh
+            threading.Thread(target=autoupdate.run_git_check, args=(self.q.put, manual, __version__), daemon=True).start()
+            return
         threading.Thread(target=autoupdate.run_check, args=(__version__, self.q.put, manual), daemon=True).start()
 
     def _update_found(self, ver: str, manual: bool):
@@ -1868,6 +1914,9 @@ class App:
         self.upd_apply_when_ready = not silent  # "Update now" clicked: install as soon as it is verified
         if not silent:
             self._upd_show("gui_upd_downloading", ver=self.upd_ver, pct=0)
+        if autoupdate.is_git_checkout():
+            threading.Thread(target=autoupdate.run_git_apply, args=(self.q.put,), daemon=True).start()
+            return
         threading.Thread(target=autoupdate.run_download, args=(self.q.put,), daemon=True).start()
 
     def _update_event(self, ev) -> bool:
@@ -1899,6 +1948,9 @@ class App:
                 self._apply_update()
             else:
                 self._upd_show("gui_upd_ready", ("gui_upd_restart", "gui_upd_later"), ver=self.upd_ver)
+        elif kind == "upd_git_done":  # #1672
+            self.upd_busy = False
+            self._upd_show("gui_upd_git_deps" if len(ev) > 1 and ev[1] else "gui_upd_git_done")
         elif kind == "upd_fail":
             self.upd_busy = False
             if self.upd_apply_when_ready:  # silent background failures stay silent
@@ -1960,7 +2012,7 @@ class App:
         mb.add_cascade(label=t("gui_menu_settings"), menu=sm)
         hm = tk.Menu(mb, tearoff=0)
         hm.add_command(label=t("gui_menu_tour"), command=self.show_tour)
-        if autoupdate.is_wizard_install():  # #698: git checkouts keep update.bat
+        if autoupdate.can_update():  # #698 installer installs; #1672 Linux / macOS git checkouts
             hm.add_command(label=t("gui_upd_check"), command=lambda: self._check_update(manual=True))
             hm.add_checkbutton(label=t("gui_upd_auto"), variable=self.v_auto_upd,
                                command=lambda: autoupdate.set_auto(self.v_auto_upd.get()))

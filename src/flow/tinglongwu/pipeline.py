@@ -18,10 +18,12 @@ from .langfollow import script_lang
 from .merge import SentenceMerger, Unit
 from .models import ModelNotFound
 from .repeat import filter_hallucination
+from .mt_context import LineContext
 from .mt_pending import live
 from .segment import Segmenter
 from .sink import Result, Sink, pass_source
 from .speakers import UNKNOWN
+from .hymt import streaming
 from .translate import Translation, Translator, translate_checked
 
 _DONE = object()
@@ -152,7 +154,7 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
         stop_event: threading.Event | None = None, log=None, on_latency=None, speakers=None,
         on_work=None, on_record=None, recorder=None,  # recorder: #239 --record (record.Recorder)
         seg_gate=None, route=None, on_backlog=None, on_mt_wait=None, mt_yield: bool | None = None,
-        on_catchup=None) -> None:
+        on_catchup=None, mt_context: bool = False, mt_stream: bool = False) -> None:
     """Capture -> segments -> ASR -> (sentence merge) -> translate -> sink.
 
     Translation and output run in their own worker thread (one, so lines stay in order): ASR of the next
@@ -181,6 +183,13 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
     resumes. on_record gets the held seconds as "mt_hold".
     on_catchup(lines) (#1369, live clock only): lines written untranslated so far to keep up (see MT_STALE_S);
     called each time it grows.
+    mt_context (#1750, --mt-context): pass the previous finished source sentence of the same speaker and language to
+    the translator as context, unless the pause between the two lines is mt_context.CONTEXT_MAX_PAUSE_S or more.
+    The context is never shown or saved as part of the line.
+    mt_stream (#1771): stream each finished line's translation token by token; a sink with write_partial(Result)
+    gets the text so far (shown in place of the pending line, never saved or spoken: write() still gets only the
+    finished line). on_record gets "t_target_first_ms": line released to MT -> first translated character (the
+    finished line when nothing streamed), next to "mt" (released -> finished line shown).
     """
     tgt0 = tgt
     t_run0 = time.monotonic()  # #1369: on_record "at" is seconds since run() started (the live audio position)
@@ -287,13 +296,25 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
         say = lambda m: draft._log(m.removeprefix("latency: "))  # noqa: E731 - clears the draft block first
 
     def write(r: Result, ep) -> None:
+        if first_tgt[0] is None:
+            first_tgt[0] = time.monotonic()
         if draft is not None:
             draft.final_written(ep)  # the final line replaces the dim draft
         sink.write(r)
         if recorder is not None:
             recorder.line(clip[0], r)
 
-    def emit(unit_text: str, lang: str, ep, queued: float, who: str | None = None, replaces: str | None = None) -> None:
+    first_tgt = [None]  # #1771: monotonic time of this line's first translated character (MT thread only)
+    partial_sink = getattr(sink, "write_partial", None)
+
+    def write_partial(r: Result) -> None:
+        if first_tgt[0] is None:
+            first_tgt[0] = time.monotonic()
+        if partial_sink is not None:
+            partial_sink(r)
+
+    def emit(unit_text: str, lang: str, ep, queued: float, who: str | None = None, replaces: str | None = None,
+             context: str | None = None) -> None:
         tgt = route(lang) if route is not None else tgt0
         mt = live(translator)  # #1357: None while a PendingTranslator's model is still downloading
         if mt is None:  # transcript-only (or MT not ready yet: this line goes out as source text)
@@ -308,10 +329,15 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
                     replaces = zh_convert(replaces, getattr(mt, "zh_variant", "tw"))
             write(Result(lang, unit_text, None, unit_text, tgt, speaker=who, replaces=replaces), ep)
             return
-        with model_lock():
+        part = None
+        if mt_stream:
+            part = lambda text: write_partial(Result(lang, unit_text, None, text, tgt, speaker=who,  # noqa: E731
+                                                     replaces=replaces))
+        with model_lock(), streaming(mt, part):
             t0 = time.monotonic()
             try:
-                tr = translate_checked(mt, unit_text, lang, tgt)
+                tr = translate_checked(mt, unit_text, lang, tgt, context=context) if context else \
+                    translate_checked(mt, unit_text, lang, tgt)
             except ModelNotFound as e:  # a language turned up whose model is not installed: say so, keep running
                 if (lang, tgt) not in missing:
                     missing.add((lang, tgt))
@@ -359,6 +385,7 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
         return held
 
     skipped = [0]  # #1369: lines left untranslated to catch up
+    line_ctx = LineContext() if mt_context else None  # #1750: previous finished line per speaker
 
     def stale(item) -> bool:
         """#1369: this line is too old to be worth translating now, and newer lines wait behind it."""
@@ -382,6 +409,7 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
                 if stopping():
                     return  # Stop during the hold: start no translation or output after run() returned
                 t_emit = time.monotonic()
+                first_tgt[0] = None
                 clip[0] = item[9]  # #239: audio of this line (only the MT thread reads it)
                 if draft is not None:
                     draft.last_first_draft = None  # #511: final_written() fills it while emit() writes the line
@@ -394,7 +422,15 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
                     if on_catchup is not None:
                         on_catchup(skipped[0])
                 else:
-                    emit(*item[:4], who=item[8], replaces=item[10])
+                    ctx = None
+                    if line_ctx is not None:
+                        ctx = line_ctx.before(item[8], item[1], item[11][0], replaces=item[10] is not None)
+                        if ctx:
+                            say(f"latency: mt context {len(ctx)} chars")
+                    emit(*item[:4], who=item[8], replaces=item[10], context=ctx)
+                if line_ctx is not None:  # a skipped line is still the previous line of the stream
+                    line_ctx.after(item[8], item[1], item[0], item[11][1], finished=not item[11][2],
+                                   replaces=item[10] is not None)
                 if on_record is not None and item[6] is not None:
                     t_shown = time.monotonic()
                     rec = _record(item, t_shown)
@@ -402,7 +438,9 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
                     rec["draft"] = None if d is None else round(d, 3)  # #511: seconds to the first draft, null = none
                     rec["mt_hold"] = round(held, 3)  # #1253: part of "mt" spent waiting for ASR to catch up
                     rec["mt_skipped"] = skip  # #1369: written untranslated to catch up
-                    rec["at"] = round(t_shown - t_run0, 3)  # #1369: when it was shown, s since start
+                    rec["at"] = round(t_shown - t_run0, 3)
+                    t1 = first_tgt[0] if first_tgt[0] is not None else t_shown
+                    rec["t_target_first_ms"] = round(max(0.0, t1 - item[3]) * 1000)  # #1771  # #1369: when it was shown, s since start
                     on_record(rec)
                 if on_work is not None and not skip:  # no MT ran: a 0 ms line would skew the per-line MT time
                     on_work(item[4], time.monotonic() - t_emit, item[5])
@@ -444,8 +482,11 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
             if replaces is None and translator is not None and draft is None and lang != (route(lang) if route is not None else tgt) and hasattr(sink, "write_source"):
                 pass_source(sink, lang, text, who)  # #53: the source line now, its translation when MT is done
                 t_src = time.monotonic() if shows_source else None
+            # #1750: (start of the unit's oldest segment, end of its newest, released by cap / timeout), audio clock
+            span = ((u.first or u.tag)[3], u.tag[4], u.forced) if u.tag is not None and len(u.tag) > 4 \
+                else (None, None, u.forced)
             mtq.put((text, lang, last_ep[0], time.monotonic(), last_asr[0], last_len[0], marks, t_src, who, audio,
-                     replaces))
+                     replaces, span))
 
     def check_worker() -> None:
         if failed:
@@ -573,10 +614,10 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
                     say(f"latency: spk {spk:.3f} s ({who})")
                 last_who[0] = None if who == UNKNOWN else who
             seg_n[0] += 1
+            start = join_start[0] if join_start[0] is not None else stamp - len(seg) / SAMPLE_RATE
             if recorder is not None:
-                start = join_start[0] if join_start[0] is not None else stamp - len(seg) / SAMPLE_RATE
                 recorder.add(seg_n[0], seg, start, stamp)
-            tag = (marks, last_who[0], seg_n[0])
+            tag = (marks, last_who[0], seg_n[0], start, stamp)  # #1750: start / end on the audio clock
             if merger is None or translator is None:
                 emit_units([Unit(t.text, t.lang, False, tag)])
                 continue

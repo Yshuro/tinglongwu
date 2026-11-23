@@ -105,3 +105,84 @@ def test_apply_script_relaunches_tlwu_exe_first():
     ps = selfupdate.apply_script(Path("C:/T/setup.exe"), Path("C:/Programs/tinglongWu"), 1)
     i_core, i_venv = ps.index("tlwu.exe'"), ps.index("tlwu-gui.exe")
     assert i_core < i_venv
+
+
+# --- #1672: Linux / git-checkout macOS update check follows the marker tag, like scripts/auto_update.sh ---------------
+def _git_repo(tmp_path):
+    def g(*a, cwd):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd, check=True, capture_output=True)
+
+    origin, work = tmp_path / "origin", tmp_path / "work"
+    origin.mkdir()
+    g("init", "-q", "-b", "main", cwd=origin)
+    (origin / "f").write_text("1")
+    g("add", ".", cwd=origin)
+    g("commit", "-q", "-m", "one", cwd=origin)
+    g("tag", "linux-ok", cwd=origin)
+    subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True, capture_output=True)
+    subprocess.run(["git", "checkout", "-q", "--detach", "linux-ok"], cwd=work, check=True, capture_output=True)
+    return g, origin, work
+
+
+def test_git_checkout_update_available_and_apply(source, monkeypatch, tmp_path):
+    monkeypatch.delenv("TLWU_OFFLINE", raising=False)
+    g, origin, work = _git_repo(tmp_path)
+    assert autoupdate.is_git_checkout(work, "linux") and autoupdate.can_update(work, "linux")
+    assert not autoupdate.is_git_checkout(work, "win32")
+    assert autoupdate.git_check(work, platform="linux") == "uptodate"
+    (origin / "f").write_text("2")
+    g("commit", "-q", "-am", "two", cwd=origin)
+    g("tag", "-f", "linux-ok", cwd=origin)  # the release moved the marker tag
+    assert autoupdate.git_check(work, platform="linux") == "update"
+    events = []
+    assert autoupdate.run_git_check(events.append, True, "0.0.0", root=work) == "latest"
+    assert events == [("upd_found", "latest", True)]
+    autoupdate.git_apply(work, platform="linux")
+    assert (work / "f").read_text() == "2"
+    assert autoupdate.git_check(work, platform="linux") == "uptodate"
+
+
+def test_git_check_ignores_commits_past_the_marker_tag(source, monkeypatch, tmp_path):
+    monkeypatch.delenv("TLWU_OFFLINE", raising=False)
+    g, origin, work = _git_repo(tmp_path)
+    (origin / "f").write_text("3")
+    g("commit", "-q", "-am", "unreleased", cwd=origin)  # main moved, marker tag did not
+    assert autoupdate.git_check(work, platform="linux") == "uptodate"
+
+
+def test_git_check_fetch_failure_is_reported(source, monkeypatch, tmp_path):
+    monkeypatch.delenv("TLWU_OFFLINE", raising=False)
+    g, origin, work = _git_repo(tmp_path)
+    subprocess.run(["git", "remote", "set-url", "origin", str(tmp_path / "gone")], cwd=work, check=True)
+    events = []
+    assert autoupdate.run_git_check(events.append, True, "0.0.0", root=work) is None
+    assert events[0][0] == "upd_fail_check"
+
+
+def test_git_apply_reports_dependency_changes(source, monkeypatch, tmp_path):
+    monkeypatch.delenv("TLWU_OFFLINE", raising=False)
+    g, origin, work = _git_repo(tmp_path)
+    (origin / "f").write_text("2")
+    g("commit", "-q", "-am", "plain", cwd=origin)
+    g("tag", "-f", "linux-ok", cwd=origin)
+    assert autoupdate.git_apply(work, platform="linux") is False
+    (origin / "pyproject.toml").write_text("[project]\n")
+    g("add", ".", cwd=origin)
+    g("commit", "-q", "-m", "deps", cwd=origin)
+    g("tag", "-f", "linux-ok", cwd=origin)
+    events = []
+    assert autoupdate.git_check(work, platform="linux") == "update"
+    assert autoupdate.run_git_apply(events.append, root=work) is True
+    assert events == [("upd_git_done", True)]
+
+
+def test_git_check_unresolvable_target_is_an_error(source, monkeypatch, tmp_path):
+    monkeypatch.delenv("TLWU_OFFLINE", raising=False)
+    g, origin, work = _git_repo(tmp_path)
+    subprocess.run(["git", "tag", "-d", "linux-ok"], cwd=work, check=True, capture_output=True)
+    subprocess.run(["git", "update-ref", "-d", "refs/remotes/origin/main"], cwd=work, check=True, capture_output=True)
+    events = []
+    # fetch --tags restores linux-ok, so point the target at a name that cannot resolve
+    monkeypatch.setattr(autoupdate, "git_target", lambda *a, **k: "refs/tags/nope")
+    assert autoupdate.run_git_check(events.append, True, "0.0.0", root=work) is None
+    assert events[0][0] == "upd_fail_check"

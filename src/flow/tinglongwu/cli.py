@@ -88,6 +88,14 @@ def parse_args(argv=None):
                    help="when the Hy-MT2 model is not installed yet (still downloading, e.g. the app's first run), "
                         "start with source-language lines and translate from the line after the model lands, "
                         "without a restart (#1357). Without it tlwu stops and prints the setup command")
+    p.add_argument("--mt-context", action="store_true",
+                   help="give the translator the previous finished sentence of the same speaker and language as "
+                        "context (not after a pause of 4 s or more). Off by default: fewer wrong word senses in "
+                        "the #1394 eval, about +0.2 s MT time per line on CPU (#1750)")
+    p.add_argument("--no-mt-stream", action="store_true",
+                   help="show each translation only when it is finished. Default on a live session: the line "
+                        "fills in as Hy-MT2 writes it (saved transcripts and the voice still get only the finished "
+                        "line); files (not paced) never stream (#1771)")
     p.add_argument("--no-merge", action="store_true",
                    help="translate every VAD segment separately (default: merge into sentences first)")
     p.add_argument("--max-wait", type=float, default=None,
@@ -182,6 +190,8 @@ def parse_args(argv=None):
     p.add_argument("--speed", action="store_true",
                    help="with --probe: also run the ~10 s translation speed test (CPU: Hy-MT2 on this CPU); the "
                         "result is remembered until the hardware changes")
+    p.add_argument("--time-backend", choices=("cpu", "vulkan"), default=None,
+                   help=argparse.SUPPRESS)  # #1773: child of the GPU speed check (backend_probe.time_here)
     p.add_argument("--reprobe", action="store_true",
                    help="with --probe --speed: ignore the remembered result and measure again")
     p.add_argument("--speakers", action="store_true",
@@ -274,13 +284,15 @@ def want_model(level: str, dev: str, hw=None, asr_choice=None) -> tuple[str, str
     return want, tier.name
 
 
-def auto_model(level: str, dev: str, mdir, hw=None, say=print, asr_choice=None) -> str:
+def auto_model(level: str, dev: str, mdir, hw=None, say=print, asr_choice=None, vulkan=None) -> str:
     """Speech model when --model is not given: the hardware tier's model for the quality level (#81), or the
     best downloaded one when that model is not on disk (#96). `dev` is the device really in use: on "cpu" the
     CPU tier applies even if a GPU is present (old driver, --device cpu). On the CPU tier, auto / balanced / fast
     never use a larger model than the remembered speed test found real-time on this PC (#131; `asr_choice(hw)`
-    reads the cache only, never measures). quality is the user asking for the slower model, so it is kept."""
-    from .models import pick_whisper
+    reads the cache only, never measures). quality is the user asking for the slower model, so it is kept.
+    #1761: no CUDA and a usable Vulkan pack with the whisper.cpp build -> sizes that only exist as
+    models/whisper-cpp/ggml-<size>.bin count too (`vulkan()` = Vulkan device + pack with the whisper.cpp build)."""
+    from .models import WHISPER_FALLBACK_BY_TIER, WHISPER_FALLBACK, pick_whisper
 
     try:
         want, tier_name = want_model(level, dev, hw, asr_choice)
@@ -288,7 +300,22 @@ def auto_model(level: str, dev: str, mdir, hw=None, say=print, asr_choice=None) 
         want, tier_name = "small", None
         say(f"tlwu: hardware probe failed ({str(e)[:120]}); using the default speech model", file=sys.stderr)
     got = pick_whisper(want, mdir, tier_name)
-    note = "" if got == want else f" ({want} is not downloaded: `tlwu-setup --whisper {want}`)"
+    picked = got
+    if dev != "cuda":
+        try:
+            from . import asr_vulkan, mt_backend
+
+            usable = vulkan or (lambda: mt_backend.vulkan_available() and asr_vulkan.pack_has_whisper())
+            if usable() and not asr_vulkan.vulkan_ready(mdir, got):
+                have = asr_vulkan.installed_sizes(mdir)
+                order = WHISPER_FALLBACK_BY_TIER.get(tier_name, WHISPER_FALLBACK)
+                alt = want if want in have else next((s for s in order if s in have), None)
+                if alt and alt != got:
+                    say(f"tlwu: speech model {alt} (whisper.cpp on Vulkan; {got} has no ggml model)", file=sys.stderr)
+                    got = alt
+        except Exception:  # noqa: BLE001 - never stop a session over the Vulkan lookup
+            pass
+    note = "" if got == want or picked == want else f" ({want} is not downloaded: `tlwu-setup --whisper {want}`)"
     say(f"tlwu: speech model = {got} (quality {level}){note}", file=sys.stderr)
     return got
 
@@ -377,7 +404,57 @@ def apply_glossary(translator, glossary) -> None:
         translator.glossary = glossary
 
 
-def make_adaptive(a, asr, translator, mdir, dev, glossary=None, cands=None, make_asr=None, log=None):
+def live_recognizer(a, mdir, dev: str, glossary=None, cands=None, *, select=None, ready=None, vulkan=None,
+                    env=None, say=None, allowed=None):
+    """#1759: the live session's speech engine. CUDA (dev "cuda") -> faster-whisper on the GPU, unchanged. No CUDA:
+    whisper.cpp on Vulkan when TLWU_DEVICE=vulkan, or on auto when the Vulkan pack has the whisper.cpp build and the
+    ggml model for a.model is downloaded; any Vulkan init failure -> faster-whisper on the CPU plus one stderr line
+    (asr_vulkan.select_recognizer). --device cpu never uses Vulkan. Prints one "speech model <size> on <backend>"
+    line. Returns (recognizer, backend used)."""
+    from . import asr_vulkan, mt_backend, vulkan_probe
+    from .asr import FasterWhisperRecognizer
+
+    env = os.environ if env is None else env
+    allowed = allowed or (lambda: vulkan_probe.vulkan_allowed(env))  # #1773: CPU won the speed check
+    say = say or (lambda m: print(m, file=sys.stderr, flush=True))
+    kw = dict(glossary=glossary, candidates=cands, lang_file=getattr(a, "lang_file", None),
+              beam=getattr(a, "cpu_beam", None), threads=getattr(a, "cpu_threads", None))
+    forced = (env.get("TLWU_DEVICE") or "").strip().lower() == "vulkan"
+    use_vk = False
+    if a.compute != "cpu":
+        if vulkan is None:
+            vulkan = mt_backend.vulkan_available
+        ready = ready or asr_vulkan.vulkan_ready
+        use_vk = bool(vulkan()) and (forced or (bool(ready(mdir, a.model)) and bool(allowed())))
+        if forced and not use_vk:  # #1774: TLWU_DEVICE=vulkan but no pack / loader: one reason + fix
+            from .vulkan_hint import fallback_line
+
+            say(fallback_line(mt_backend.forced_vulkan_unavailable(
+                mt_backend.vulkan_pack_dir(warn=lambda m: None), env=env) or "no_loader", use="ASR"))
+    rec, backend = (select or asr_vulkan.select_recognizer)(
+        mdir, a.model, a.lang, cuda=dev == "cuda", vulkan=use_vk, env=env, warn=say,
+        cpu_factory=lambda device: FasterWhisperRecognizer(mdir, a.model, a.lang, device, **kw),
+        vulkan_factory=lambda: asr_vulkan.WhisperCppVulkanRecognizer(mdir, a.model, a.lang, **kw))
+    where = ("vulkan (whisper.cpp)" if backend == "vulkan" else
+             "GPU" if getattr(rec, "device", backend) == "cuda" else "CPU")  # a CUDA load may have fallen back
+    say(f"tlwu: speech model {a.model} on {where}")
+    return rec, backend
+
+
+def vulkan_ladder(a, mdir, glossary, cands, backend: str) -> dict:
+    """#1759: make_adaptive keyword args so a Vulkan session steps down to smaller whisper.cpp models only."""
+    if backend != "vulkan":
+        return {}
+    from . import asr_vulkan
+
+    def make_asr(size):
+        return asr_vulkan.WhisperCppVulkanRecognizer(mdir, size, a.lang, glossary=glossary, candidates=cands,
+                                                     lang_file=getattr(a, "lang_file", None))
+    return {"make_asr": make_asr, "installed": asr_vulkan.installed_sizes(mdir)}
+
+
+def make_adaptive(a, asr, translator, mdir, dev, glossary=None, cands=None, make_asr=None, log=None,
+                  installed=None):
     """Wrap ASR so the latency controller can swap speech models at run time (#80). The translation engine is
     never swapped: Hy-MT2 is the only one (#471, no OPUS step-down).
     Returns (asr, translator, controller); controller is None when there is nothing to step down to."""
@@ -393,7 +470,8 @@ def make_adaptive(a, asr, translator, mdir, dev, glossary=None, cands=None, make
                                            lang_file=getattr(a, "lang_file", None), live=dev == "cpu",
                                            beam=getattr(a, "cpu_beam", None),
                                            threads=getattr(a, "cpu_threads", None))
-    lower = [(s, lambda s=s: make_asr(s)) for s in smaller_whisper(a.model, whisper_installed(mdir))]
+    have = whisper_installed(mdir) if installed is None else installed  # #1759: whisper.cpp sizes on Vulkan
+    lower = [(s, lambda s=s: make_asr(s)) for s in smaller_whisper(a.model, have)]
     if lower:
         sp = Ladder("speech model", a.model, asr, lower)
         ladders.append(sp)
@@ -590,7 +668,6 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
     backlog_line(seconds): #1259, whole seconds ASR is behind the audio (0 = caught up); default: one stderr line per change.
     mt_wait_line(lines): #1253, translations held while ASR catches up (0 = MT resumed); default: one stderr line per change.
     on_topic(topic): #611, with --topics: called on the summarizer thread with each finished topics.Topic (GUI panel)."""
-    from .asr import FasterWhisperRecognizer
     from .device import resolve_device
     from .merge import AMEND_WINDOW, SentenceMerger
     from .pipeline import run
@@ -614,7 +691,8 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
     thread_budget.set_role("listen")  # #250: one `tlwu: threads ...` line before any model loads
     explicit_model = a.model is not None
     if a.model is None:
-        a.model = auto_model(getattr(a, "quality", "auto"), dev, mdir)
+        a.model = auto_model(getattr(a, "quality", "auto"), dev, mdir,
+                             vulkan=(lambda: False) if a.compute == "cpu" else None)
     apply_cpu_mode(a, dev, mdir, explicit_model)
     if notice is not None and dev == "cpu" and a.compute != "cpu":
         from .i18n import t
@@ -651,6 +729,9 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
     if g2 is not glossary:  # #1397: e.g. Russian acronyms as Whisper hotwords
         glossary = g2
         print(f"tlwu: default {a.lang} hotwords on ({glossary.hotwords()})", file=sys.stderr)
+    from .backend_probe import maybe_probe
+
+    maybe_probe(a, mdir, dev)  # #1773: CPU vs Vulkan, cached per version / driver / pack
     prog.stage("speech model")
     cands = None
     f2f_route = None
@@ -672,12 +753,11 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
 
         cands = parse_candidates(a.lang_candidates)
         print(f"tlwu: language follows the speaker among {','.join(cands)}", file=sys.stderr)
-    asr = FasterWhisperRecognizer(mdir, a.model, a.lang, dev, glossary=glossary,
-                                  candidates=cands, lang_file=getattr(a, "lang_file", None),
-                                  beam=getattr(a, "cpu_beam", None), threads=getattr(a, "cpu_threads", None))
+    asr, asr_backend = live_recognizer(a, mdir, dev, glossary, cands)  # #1759: cuda > vulkan > cpu
     cpu_fallback_mt(dev, asr.device, asr_threads=getattr(a, "cpu_threads", None),
                     transcript_only=bool(a.transcript_only))  # #1198: a CUDA load that fell back to the CPU gets CPU mode's MT threads
-    dev = asr.device  # may have fallen back to cpu
+    if asr_backend != "vulkan":
+        dev = asr.device  # may have fallen back to cpu (Vulkan ASR keeps the session's device for MT / CPU mode)
     asr.live = asr_live(dev, a.file, getattr(a, "paced", False))  # #251 / #1264
     if stop is None or not stop.is_set():  # a session cancelled while loading does not wait for a warm-up decode
         warm_live_asr(asr, a.file, getattr(a, "paced", False), warn)  # #1247: before "ready", not on the first line
@@ -708,9 +788,13 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
             for c in cands:
                 if c != a.to:
                     translator.preload(c, a.to)
+        if stop is None or not stop.is_set():  # #1737: the first real line must not pay the MT backend's first call
+            pair = (cands[0], cands[1]) if f2f_route is not None else mt_warm_pair(a.lang, a.to, cands)
+            warm_live_mt(translator, pair, a.file, getattr(a, "paced", False), warn)
     ctl = None
     if not getattr(a, "no_adapt", False) and not a.file:  # a file runs faster than real time: queue wait is not lag
-        asr, translator, ctl = make_adaptive(a, asr, translator, mdir, dev, glossary, cands)
+        asr, translator, ctl = make_adaptive(a, asr, translator, mdir, dev, glossary, cands,
+                                             **vulkan_ladder(a, mdir, glossary, cands, asr_backend))
     rec_dir = getattr(a, "record", None)
     rec = _t("rec_label") if rec_dir is not None else ""
     if sink is None:
@@ -834,7 +918,9 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
             on_backlog=backlog_line or (lambda n: print(backlog_text(n) or "tlwu: ASR caught up", file=sys.stderr, flush=True)),
             on_mt_wait=mt_wait_line or (lambda n: print(f"tlwu: {mt_wait_text(n) or 'MT resumed'}", file=sys.stderr, flush=True)),
             on_catchup=lambda n: (notice or (lambda m: print(f"tlwu: {m}", file=sys.stderr, flush=True)))(
-                _t("catchup_note", lines=n)))  # #1369
+                _t("catchup_note", lines=n)),  # #1369
+            mt_context=bool(getattr(a, "mt_context", False)),  # #1750
+            mt_stream=not audio_clock and not getattr(a, "no_mt_stream", False))  # #1771
     except KeyboardInterrupt:
         interrupted = True
         raise
@@ -913,6 +999,44 @@ def warm_live_asr(asr, file, paced: bool, warn=None) -> bool:
     return True
 
 
+# #1737: one short line per source language for the MT warm-up; any other language uses MT_WARM_TEXT_DEFAULT.
+MT_WARM_TEXT = {"zh": "你好。", "en": "Hello.", "ja": "こんにちは。", "ko": "안녕하세요.", "ru": "Привет."}
+MT_WARM_TEXT_DEFAULT = "OK."
+
+
+def mt_warm_pair(lang: str, to: str, cands) -> tuple[str, str]:
+    """#1737: the (src, tgt) pair the MT warm-up translates: the fixed source language, else the first candidate
+    that differs from the target, else en (zh when the target is en)."""
+    if lang != "auto" and lang != to:
+        return lang, to
+    for c in cands or ():
+        if c != to:
+            return c, to
+    return ("zh", to) if to == "en" else ("en", to)
+
+
+def warm_live_mt(translator, pair, file, paced: bool, warn=None) -> bool:
+    """#1737: like warm_live_asr for the translation engine. #802: on Vulkan the first Hy-MT2 line took 2141 ms
+    against a p50 of 266 ms (backend first-call setup), so the first subtitle arrived ~2 s late. Live listening
+    translates one short line before the ready line, through draft() (no history, nothing reaches a sink), so the
+    warm-up line is never shown, saved or spoken. Same for every backend (CPU, CUDA, Vulkan) and engine. An unpaced
+    file has no live clock to protect. A failed warm-up is reported and the session goes on. Returns True when it
+    ran."""
+    if translator is None or (file and not paced):
+        return False
+    src, tgt = pair
+    hy, hy_error = getattr(translator, "hy", None), getattr(translator, "hy_error", "")
+    try:
+        translator.draft(MT_WARM_TEXT.get(src, MT_WARM_TEXT_DEFAULT), src, tgt)
+    except Exception as e:  # noqa: BLE001 - warming is an optimisation, never a reason to stop listening
+        if hy is not None and getattr(translator, "hy", hy) is None:  # JaRouter._fallback cleared the engine: keep it
+            translator.hy, translator.hy_error = hy, hy_error
+        if warn is not None:
+            warn(f"tlwu: translation warm-up failed ({e})")
+        return False
+    return True
+
+
 def merge_builtin_terms(glossary, a):
     """#1689: user entries first, then the pair's domain terms, then the built-in tech list; earlier entries win on a
     shared source. The pair table must come before tech-dev.txt: that list's targets are Chinese, so for en -> ru it
@@ -968,8 +1092,16 @@ def main(argv=None) -> int:
         from .selftest import main_from_args
 
         return main_from_args(a)
+    if a.time_backend:  # #1773: one leg of the GPU speed check, run by backend_probe.time_in_child
+        from .backend_probe import time_here
+
+        time_here(a.time_backend, models_dir(a.models_dir), a.model or "small")
+        return 0
     if a.probe:
+        from . import vulkan_probe
         from .hwprobe import describe, probe, recommend
+
+        print(vulkan_probe.summary())  # #1773
 
         hw = probe()
         tier = recommend(hw)
