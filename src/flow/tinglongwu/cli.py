@@ -88,10 +88,13 @@ def parse_args(argv=None):
                    help="when the Hy-MT2 model is not installed yet (still downloading, e.g. the app's first run), "
                         "start with source-language lines and translate from the line after the model lands, "
                         "without a restart (#1357). Without it tlwu stops and prints the setup command")
-    p.add_argument("--mt-context", action="store_true",
+    p.add_argument("--mt-context", dest="mt_context", action="store_const", const=True, default=None,
                    help="give the translator the previous finished sentence of the same speaker and language as "
-                        "context (not after a pause of 4 s or more). Off by default: fewer wrong word senses in "
-                        "the #1394 eval, about +0.2 s MT time per line on CPU (#1750)")
+                        "context (not after a pause of 4 s or more), for every source language. Default: on for a "
+                        "Russian source only (fewer wrong word senses: 30%% -> 9%% on the ru polysemy lines, +2%% MT "
+                        "time on a Vulkan GPU, +23%% on CPU; #1750, #1795)")
+    p.add_argument("--no-mt-context", dest="mt_context", action="store_const", const=False,
+                   help="never give the translator the previous sentence as context")
     p.add_argument("--no-mt-stream", action="store_true",
                    help="show each translation only when it is finished. Default on a live session: the line "
                         "fills in as Hy-MT2 writes it (saved transcripts and the voice still get only the finished "
@@ -147,8 +150,8 @@ def parse_args(argv=None):
                    help="also load the built-in tech/dev glossary (your --glossary entries win)")
     p.add_argument("--term-scenario", default="", metavar="NAME",
                    help="#1689: with --builtin-glossary, also use the built-in term files (data/terms/*.tsv) of this "
-                        "scenario, e.g. tech, for the --lang -> --to pair (default: only files marked for "
-                        "every scenario)")
+                        "scenario, e.g. tech, for the --lang -> --to pair (default: tech for a Russian "
+                        "source (#1799), else only files marked for every scenario; `none` = only the latter)")
     p.add_argument("--glossary", metavar="PATH",
                    help="topic glossary: a UTF-8 .txt file or a folder of .txt files, one entry per line "
                         "`source = target` (`#` comments; a line without `=` is a plain hint term). Source terms "
@@ -731,7 +734,9 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
         print(f"tlwu: default {a.lang} hotwords on ({glossary.hotwords()})", file=sys.stderr)
     from .backend_probe import maybe_probe
 
-    maybe_probe(a, mdir, dev)  # #1773: CPU vs Vulkan, cached per version / driver / pack
+    maybe_probe(a, mdir, dev, stop=stop)  # #1773: CPU vs Vulkan, cached per version / driver / pack
+    if stop is not None and stop.is_set():  # #1791: stopped during the speed check: do not load models
+        return
     prog.stage("speech model")
     cands = None
     f2f_route = None
@@ -919,7 +924,7 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
             on_mt_wait=mt_wait_line or (lambda n: print(f"tlwu: {mt_wait_text(n) or 'MT resumed'}", file=sys.stderr, flush=True)),
             on_catchup=lambda n: (notice or (lambda m: print(f"tlwu: {m}", file=sys.stderr, flush=True)))(
                 _t("catchup_note", lines=n)),  # #1369
-            mt_context=bool(getattr(a, "mt_context", False)),  # #1750
+            mt_context=getattr(a, "mt_context", None),  # #1750, #1795
             mt_stream=not audio_clock and not getattr(a, "no_mt_stream", False))  # #1771
     except KeyboardInterrupt:
         interrupted = True
@@ -1044,9 +1049,9 @@ def merge_builtin_terms(glossary, a):
     from .glossary import load_builtin, merge
 
     if not getattr(a, "face_to_face", None):
-        from .glossary import load_builtin_pair, scenario_domains
+        from .glossary import effective_scenario, load_builtin_pair, scenario_domains
 
-        doms = scenario_domains(getattr(a, "term_scenario", None))
+        doms = scenario_domains(effective_scenario(getattr(a, "term_scenario", None), getattr(a, "lang", None)))
         glossary = merge(glossary, load_builtin_pair(getattr(a, "lang", None), getattr(a, "to", None), doms,
                                                       getattr(a, "zh_variant", None)))
     return merge(glossary, load_builtin("auto" if getattr(a, "face_to_face", None) else getattr(a, "lang", None)))

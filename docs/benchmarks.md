@@ -119,6 +119,19 @@ Fixes tried (ru -> zh-Hant / ru -> en, COMET / chrF / median s per sentence, CPU
 - Quality: context helps where the issue said it would. On the polysemy lines the wrong-sense rate drops from 21.7% to 8.7% (5 of 23 lines to 2) and chrF rises 3.6; over all 79 lines invented content halves. Finished short lines (`complete`, `number`) lose 3-5 chrF with context (small n: 8 and 6 lines).
 - Speed: +23% median MT time per line (+0.21 s), +31% on the polysemy lines. The context sentence lengthens the prompt the CPU has to read for every line. That is over the issue's 15% bar, so the opt-in setting (`--mt-context` + GUI checkbox) is **not shipped**. The tested pipeline wiring (previous finished line of the same speaker and language, at most one sentence, not across a 4 s pause) is kept on branch `fix/1394` at commit efb1e6c for a later attempt.
 - Shipped as opt-in (#1750, owner decision: ~0.1 s end-to-end on the owner's laptop): `tlwu --mt-context` (default off) uses this wiring; the GUI checkbox is a follow-up.
+- Shipped as opt-in (#1750), then **default on for a Russian source** (#1795, after the Vulkan re-measurement below): `tlwu --no-mt-context` turns it off, `--mt-context` turns it on for every language. Only ru is on by default because it is the only language measured.
+
+#### Same eval on a Vulkan iGPU (#1795)
+
+The overhead above is prompt reading on a CPU. Same 79 lines, `eval-fragments` with context off vs on, on a Linux laptop with an AMD Radeon iGPU (Mesa 25.2.8, RADV Vulkan), on battery in performance mode, 3 runs each, median reported.
+
+| lines | n | median s per line off / on | overhead | chrF off / on | wrong-sense % off / on |
+|---|---|---|---|---|---|
+| all | 79 | 0.337 / 0.343 | +1.8% | 27.4 / 28.1 | 12.7 / 5.1 |
+| polysemy (ru -> zh-Hant) | 23 | 0.399 / 0.397 | -0.5% | 20.0 / 25.3 | 30.4 / 8.7 |
+
+- Speed: +1.8% overall (the +23% on CPU does not carry over to the GPU), well under the 15% bar. Quality is not worse overall; as on CPU, `idiom` (chrF 25.9 -> 22.2) and `number` (30.9 -> 25.9, n = 6) lose chrF with context, small samples.
+- Not measured: the CPU-only path keeps the +23%; a CPU-only user can pass `--no-mt-context`.
 - COMET is not scored by this eval (chrF and the invented / wrong-sense rate only).
 - What could bring it under 15%: a shorter context (only the last few words of the previous line), or reusing llama.cpp's prompt cache across lines (the previous line is already in the cache as the last prompt's text, but in another position). Neither is measured.
 
@@ -174,6 +187,24 @@ To reproduce (needs the bench venv, the data under `%USERPROFILE%/tlwu-eval`, an
 **Bench only; sends test sentences to that service.** `scripts/bench/run.py` and `google_ref.py` call Google Cloud Translation v2 (and, for the FLEURS run, Speech-to-Text v1, which receives the test audio) only when a key file exists and `--no-google` is not given. They are dev tools: the `tinglongwu` package never imports `scripts/`, and no normal `tlwu` / `tlwu-gui` / reverse-mode path calls them. `fetch_data.py` also downloads the test sets (FLORES-200, FLEURS) from the network.
 
 **Google scores higher than every offline engine** in every direction we tested. The offline engines trade some quality for working with no network and no data leaving the machine. Small samples (50 sentences) are indicative only.
+
+### Russian source uses the `tech` term tables by default (#1799)
+Before: a ru session only loaded the legacy list; the ~2,200 `tech` entries (7 files in `data/terms/`) needed `--term-scenario tech`. Now `TECH_DEFAULT_LANGS = {"ru"}` (`glossary.py`) turns `tech` on for a Russian source; `--term-scenario none` turns it off. The GUI always passes `--builtin-glossary`, so it gets the default too (the GUI has no scenario dropdown yet).
+
+Measured here (no MT model in the cloud run, so this is the **source-side** count: glossary entries that fire on the 59 ru lines of `eval/fragment_cases.jsonl`, ru -> zh; script in the PR). MT-level term accuracy (`eval-fragments`, wrong senses) is not measured yet and is the open Acceptance item.
+
+| domain file | entries (ru -> zh) | fragment | idiom | complete | polysemy |
+|---|---|---|---|---|---|
+| hardware-embedded | 365 | 1 | 1 | 0 | 2 |
+| legacy-tech | 57 | 0 | 0 | 1 | 7 |
+| meeting-pm | 385 | 2 | 4 | 1 | 5 |
+| networking | 394 | 2 | 1 | 0 | 1 |
+| os-cloud-devops | 378 | 0 | 0 | 0 | 2 |
+| security | 348 | 0 | 0 | 0 | 0 |
+| software-dev | 352 | 0 | 2 | 0 | 7 |
+| all `tech` | 2279 | 5 | 8 | 2 | 24 |
+
+All 24 polysemy hits are the intended technical sense (ветка -> 分支, прод -> 正式環境, сборка -> 建置, ...). Of the 8 idiom-line hits, 2 are false hits on everyday sentences: `поллитры` (matches `поллить`, `software-dev` / `hardware-embedded` polling entries) and `пошло коту под хвост` (matches `хвосты`, `meeting-pm` `pm.carry_over`). That is within the issue's "not more than 2 everyday lines" bar, but only if MT output confirms it: re-run `eval-fragments` with and without `--term-scenario none` before treating #1799 as closed.
 
 ## Japanese eval set (ja -> zh-TW, #346)
 

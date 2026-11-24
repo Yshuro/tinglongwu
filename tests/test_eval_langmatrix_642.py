@@ -115,7 +115,11 @@ def test_workflow_builds_its_matrix_from_the_config():
     assert "langmatrix matrix" in jobs["matrix"]["steps"][-1]["run"]
     strat = jobs["pair"]["strategy"]
     assert strat["fail-fast"] is False and "fromJSON(needs.matrix.outputs.jobs)" in strat["matrix"]["include"]
-    assert jobs["pair"]["timeout-minutes"] <= 30
+    t = jobs["pair"]["timeout-minutes"]
+    if isinstance(t, str):  # #1746: 30 for whisper small (schedule / PR), 60 only for a medium / turbo dispatch
+        assert "== 'small' && 30 || 60" in t
+    else:
+        assert t <= 30
 
 
 def test_committed_config_runs_every_pair_on_20_pinned_clips():
@@ -148,3 +152,24 @@ def test_blocked_pair_is_listed_not_run(tmp_path):
     bad.write_text(json.dumps({"pairs": [{"pair": "hi->zh", "pins": "eval/p.json", "clips": 20, "blocked": " "}]}))
     with pytest.raises(langmatrix.ConfigError):
         langmatrix.load_config(bad)
+
+
+def test_matrix_only_keeps_one_pair_for_the_gigaam_dispatch_1747(capsys):
+    """#1747: eval-langs.yml --asr gigaam-v3 runs only ru->zh; an unknown pair yields no job and exit 1."""
+    assert langmatrix.main(["matrix", "--only", "ru->zh"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert [j["pair"] for j in doc["include"]] == ["ru->zh"]
+    assert doc["include"][0]["clips"] == 20
+    assert langmatrix.main(["matrix", "--only", "xx->zh"]) == 1
+    assert json.loads(capsys.readouterr().out)["include"] == []
+    assert langmatrix.main(["matrix"]) == 0
+    assert len(json.loads(capsys.readouterr().out)["include"]) > 1
+
+
+def test_matrix_only_takes_a_comma_list_1746(capsys):
+    """#1746: the `pairs` dispatch input is a comma list; spaces and empty items are ignored."""
+    assert langmatrix.main(["matrix", "--only", "ru->zh, en->zh,"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert sorted(j["pair"] for j in doc["include"]) == ["en->zh", "ru->zh"]
+    assert langmatrix.main(["matrix", "--only", "ru->zh,xx->zh"]) == 0
+    assert [j["pair"] for j in json.loads(capsys.readouterr().out)["include"]] == ["ru->zh"]
