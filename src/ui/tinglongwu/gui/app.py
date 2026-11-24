@@ -19,6 +19,7 @@ from .icon import apply_icon, icon_path, set_app_id
 from ..langs import from_label as lang_from_label, label as lang_label, labels as lang_labels
 from ..i18n import SILENT_CLEAR
 from .core import scene_of as scene_mode_name
+from . import core
 from .core import (SpeakerColors, SPK_AVATAR_FG, speaker_initial, speaker_text, SCENES, WATCH_MODE, scene_mode, scene_runs, mic_toggle_visible, toggled_source, strip_silent_hint, GUI_SEND_MODES, BOTH_MODE, SPEAK_MARK, SpeakQueueSink, start_button, cpu_ram_gb, choice_label, choice_labels, choice_value, SPEAK_HINT_CABLE, meeting_cable, quick_settings, SameLanguageError, SEND_MODES, send_mode_notice_key, restart_needed, send_gate_line, speak_route, speak_start_view, tour_on_start, USAGE_CHOICES, usage_answer, usage_should_ask, tour_text, ALPHA_STEP, FONT_MAX, FONT_MIN, ROWS_MAX, ROWS_MIN, HISTORY_LINES, PRESETS, QUALITIES, SOURCES, TARGETS, QueueDraftRenderer,
                    QueueSink, SubtitleState, engine_from_label, engine_labels, clamp_font, clamp_rows, follow_newest, load_settings,
                    combo_width, doctor_lang, is_downloaded, label_for_model, model_from_label, model_labels, rows_after_drag, run_download, run_setup_check, missing_start_model, StartDownload, quality_hint, quality_speech_model,
@@ -575,6 +576,7 @@ def _system_cpu_percent(app):
 class App:
     def __init__(self):
         self.settings = load_settings()
+        core.set_tech_labels(setting=self.settings["tech_labels"])  # #1806
         self.q: queue.Queue = queue.Queue()
         self.state = SubtitleState(HISTORY_LINES)
         self.listening = False  # a session is running (Start pressed, worker not yet stopped)
@@ -622,6 +624,7 @@ class App:
         self._build_bar()
         self._build_update_line()
         self._build_gpu_offer()  # #1525: one-click GPU speed-up pack offer (NVIDIA only)
+        self.v_tech = tk.BooleanVar(master=self.root, value=self.settings["tech_labels"])  # #1806: plain wording by default
         self.build_menubar()
         self.overlay = Overlay(self.root, self)
         self._sync_bar()  # #1042: the bar is not on screen before Start
@@ -2057,6 +2060,7 @@ class App:
         self.v_notes_float = tk.BooleanVar(master=self.root, value=notes_float_on(self.settings))  # #1705
         sm.add_checkbutton(label=t("gui_topics_float"), variable=self.v_notes_float, command=self._notes_float_toggled)
         sm.configure(postcommand=self._sync_topics_var)  # #1379: the check mark follows the GPU default
+        sm.add_checkbutton(label=t("gui_tech_labels"), variable=self.v_tech, command=self._tech_toggled)  # #1806: in the menu: a panel row made Advanced too tall (#886)
         mb.add_cascade(label=t("gui_menu_settings"), menu=sm)
         hm = tk.Menu(mb, tearoff=0)
         hm.add_command(label=t("gui_menu_tour"), command=self.show_tour)
@@ -3053,6 +3057,12 @@ class App:
             self.v_save_path.set(p)
             self.v_save.set(True)
 
+    def _tech_toggled(self):
+        """#1806: the "Show technical details" switch: only the label texts change, never a stored value."""
+        self.settings["tech_labels"] = self.v_tech.get()
+        core.set_tech_labels(setting=self.v_tech.get())
+        self._relabel_combos()
+
     def _src_toggled(self):
         self.settings["show_src"] = self.var_show_src.get()
         self.overlay.var_src.set(self.var_show_src.get())
@@ -3108,7 +3118,7 @@ class App:
         s.update(lang=lang_from_label(self.v_lang.get()), target=self.v_target.get(), engine=engine_from_label(self.v_engine.get()), quality=self.v_quality.get(),
                  model=model_from_label(self.v_model.get()), preset=self.v_preset.get(), glossary=self.v_gloss.get().strip(), save=self.v_save.get(),
                  save_path=self.v_save_path.get().strip(), show_src=self.var_show_src.get(),
-                 live_draft=self.v_live.get(), source=self.v_source.get(), floating_bar=self.v_bar.get(),
+                 tech_labels=self.v_tech.get(), live_draft=self.v_live.get(), source=self.v_source.get(), floating_bar=self.v_bar.get(),
                  listen_device="" if self.v_listen_dev.get() == self.listen_default else self.v_listen_dev.get(),
                  mic_device="" if self.v_mic_dev.get() == self.mic_default else self.v_mic_dev.get(),
                  gpu_use=self.v_gpu_use.get(),
