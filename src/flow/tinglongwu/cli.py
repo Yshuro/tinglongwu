@@ -88,10 +88,13 @@ def parse_args(argv=None):
                    help="when the Hy-MT2 model is not installed yet (still downloading, e.g. the app's first run), "
                         "start with source-language lines and translate from the line after the model lands, "
                         "without a restart (#1357). Without it tlwu stops and prints the setup command")
-    p.add_argument("--mt-context", action="store_true",
+    p.add_argument("--mt-context", dest="mt_context", action="store_const", const=True, default=None,
                    help="give the translator the previous finished sentence of the same speaker and language as "
-                        "context (not after a pause of 4 s or more). Off by default: fewer wrong word senses in "
-                        "the #1394 eval, about +0.2 s MT time per line on CPU (#1750)")
+                        "context (not after a pause of 4 s or more), for every source language. Default: on for a "
+                        "Russian source only (fewer wrong word senses: 30%% -> 9%% on the ru polysemy lines, +2%% MT "
+                        "time on a Vulkan GPU, +23%% on CPU; #1750, #1795)")
+    p.add_argument("--no-mt-context", dest="mt_context", action="store_const", const=False,
+                   help="never give the translator the previous sentence as context")
     p.add_argument("--no-mt-stream", action="store_true",
                    help="show each translation only when it is finished. Default on a live session: the line "
                         "fills in as Hy-MT2 writes it (saved transcripts and the voice still get only the finished "
@@ -921,7 +924,7 @@ def _run_session(a, sink=None, draft_factory=None, stop=None, status=None, notic
             on_mt_wait=mt_wait_line or (lambda n: print(f"tlwu: {mt_wait_text(n) or 'MT resumed'}", file=sys.stderr, flush=True)),
             on_catchup=lambda n: (notice or (lambda m: print(f"tlwu: {m}", file=sys.stderr, flush=True)))(
                 _t("catchup_note", lines=n)),  # #1369
-            mt_context=bool(getattr(a, "mt_context", False)),  # #1750
+            mt_context=getattr(a, "mt_context", None),  # #1750, #1795
             mt_stream=not audio_clock and not getattr(a, "no_mt_stream", False))  # #1771
     except KeyboardInterrupt:
         interrupted = True

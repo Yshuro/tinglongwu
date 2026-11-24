@@ -119,6 +119,19 @@ Fixes tried (ru -> zh-Hant / ru -> en, COMET / chrF / median s per sentence, CPU
 - Quality: context helps where the issue said it would. On the polysemy lines the wrong-sense rate drops from 21.7% to 8.7% (5 of 23 lines to 2) and chrF rises 3.6; over all 79 lines invented content halves. Finished short lines (`complete`, `number`) lose 3-5 chrF with context (small n: 8 and 6 lines).
 - Speed: +23% median MT time per line (+0.21 s), +31% on the polysemy lines. The context sentence lengthens the prompt the CPU has to read for every line. That is over the issue's 15% bar, so the opt-in setting (`--mt-context` + GUI checkbox) is **not shipped**. The tested pipeline wiring (previous finished line of the same speaker and language, at most one sentence, not across a 4 s pause) is kept on branch `fix/1394` at commit efb1e6c for a later attempt.
 - Shipped as opt-in (#1750, owner decision: ~0.1 s end-to-end on the owner's laptop): `tlwu --mt-context` (default off) uses this wiring; the GUI checkbox is a follow-up.
+- Shipped as opt-in (#1750), then **default on for a Russian source** (#1795, after the Vulkan re-measurement below): `tlwu --no-mt-context` turns it off, `--mt-context` turns it on for every language. Only ru is on by default because it is the only language measured.
+
+#### Same eval on a Vulkan iGPU (#1795)
+
+The overhead above is prompt reading on a CPU. Same 79 lines, `eval-fragments` with context off vs on, on a Linux laptop with an AMD Radeon iGPU (Mesa 25.2.8, RADV Vulkan), on battery in performance mode, 3 runs each, median reported.
+
+| lines | n | median s per line off / on | overhead | chrF off / on | wrong-sense % off / on |
+|---|---|---|---|---|---|
+| all | 79 | 0.337 / 0.343 | +1.8% | 27.4 / 28.1 | 12.7 / 5.1 |
+| polysemy (ru -> zh-Hant) | 23 | 0.399 / 0.397 | -0.5% | 20.0 / 25.3 | 30.4 / 8.7 |
+
+- Speed: +1.8% overall (the +23% on CPU does not carry over to the GPU), well under the 15% bar. Quality is not worse overall; as on CPU, `idiom` (chrF 25.9 -> 22.2) and `number` (30.9 -> 25.9, n = 6) lose chrF with context, small samples.
+- Not measured: the CPU-only path keeps the +23%; a CPU-only user can pass `--no-mt-context`.
 - COMET is not scored by this eval (chrF and the invented / wrong-sense rate only).
 - What could bring it under 15%: a shorter context (only the last few words of the previous line), or reusing llama.cpp's prompt cache across lines (the previous line is already in the cache as the last prompt's text, but in another position). Neither is measured.
 
