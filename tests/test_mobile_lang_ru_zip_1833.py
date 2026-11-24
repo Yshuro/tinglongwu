@@ -43,7 +43,6 @@ def _run(mod, monkeypatch, files, models, lic, out):
 
 
 def test_ru_group_pins_match_eval_gigaam():
-    spec = importlib.util.spec_from_file_location("g", ROOT / "eval/tlwu_eval/gigaam.py")
     src_pins = None
     try:
         import sys
