@@ -11,7 +11,9 @@ the model card's contextual prompt (`hymt.build_prompt(context=...)`). Rules:
   - never across a long pause: when this line starts CONTEXT_MAX_PAUSE_S or more after the previous line ended
     (audio clock), there is no context;
   - the context is only part of the prompt: it is never shown, saved or counted as part of the current line.
-Off by default: eval-fragments numbers in docs/benchmarks.md ("Previous sentence as MT context, live", #1394)."""
+On by default for a Russian source (CONTEXT_DEFAULT_LANGS: the language it was measured on, #1795); `--no-mt-context`
+turns it off, `--mt-context` turns it on for every language. Numbers: docs/benchmarks.md ("Previous sentence as MT
+context, live", #1394, and the Vulkan re-measurement, #1795)."""
 from __future__ import annotations
 
 import re
@@ -20,6 +22,10 @@ import re
 # it helps. Longer than the merger's pause-send (0.8 s, ja 0.5) so ordinary sentence gaps keep the context. #1750
 # Goal ("not across a >= 4 s pause"), the value the #1394 wiring used; not tuned on data.
 CONTEXT_MAX_PAUSE_S = 4.0
+
+# Languages whose lines get context when the user did not choose (#1795): Russian only, the one language measured
+# (ru polysemy wrong-sense 30.4% -> 8.7% on Vulkan, +1.8% MT time). `--mt-context` forces every language.
+CONTEXT_DEFAULT_LANGS = frozenset({"ru"})
 
 _SENT = re.compile(r"[^.!?。！？…]+[.!?。！？…]*")
 
@@ -33,8 +39,9 @@ def last_sentence(text: str) -> str:
 class LineContext:
     """Remembers the previous finished line per speaker. Used by the single MT worker thread only."""
 
-    def __init__(self, max_pause: float = CONTEXT_MAX_PAUSE_S):
+    def __init__(self, max_pause: float = CONTEXT_MAX_PAUSE_S, langs: frozenset | None = None):
         self.max_pause = max_pause
+        self.langs = langs  # None = every language; else only lines in these languages get context (#1795)
         # who -> (lang, sentence, end on the audio clock, the entry it followed: for a #1395 replacement line)
         self._last: dict = {}
 
@@ -50,6 +57,8 @@ class LineContext:
         """Context for a line of `who` in `lang` that starts at `start` (audio seconds); None = translate alone.
         replaces (#1395): the line re-sends the previous line plus a late fragment, so its context is the line
         before the one it replaces."""
+        if self.langs is not None and lang not in self.langs:
+            return None
         entry = self._last.get(who)
         if replaces:
             entry = entry[3] if entry is not None else None

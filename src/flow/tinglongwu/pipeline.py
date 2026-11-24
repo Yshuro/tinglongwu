@@ -18,7 +18,7 @@ from .langfollow import script_lang
 from .merge import SentenceMerger, Unit
 from .models import ModelNotFound
 from .repeat import filter_hallucination
-from .mt_context import LineContext
+from .mt_context import CONTEXT_DEFAULT_LANGS, LineContext
 from .mt_pending import live
 from .segment import Segmenter
 from .sink import Result, Sink, pass_source
@@ -154,7 +154,7 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
         stop_event: threading.Event | None = None, log=None, on_latency=None, speakers=None,
         on_work=None, on_record=None, recorder=None,  # recorder: #239 --record (record.Recorder)
         seg_gate=None, route=None, on_backlog=None, on_mt_wait=None, mt_yield: bool | None = None,
-        on_catchup=None, mt_context: bool = False, mt_stream: bool = False) -> None:
+        on_catchup=None, mt_context: bool | None = False, mt_stream: bool = False) -> None:
     """Capture -> segments -> ASR -> (sentence merge) -> translate -> sink.
 
     Translation and output run in their own worker thread (one, so lines stay in order): ASR of the next
@@ -183,8 +183,10 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
     resumes. on_record gets the held seconds as "mt_hold".
     on_catchup(lines) (#1369, live clock only): lines written untranslated so far to keep up (see MT_STALE_S);
     called each time it grows.
-    mt_context (#1750, --mt-context): pass the previous finished source sentence of the same speaker and language to
-    the translator as context, unless the pause between the two lines is mt_context.CONTEXT_MAX_PAUSE_S or more.
+    mt_context (#1750, --mt-context / --no-mt-context): pass the previous finished source sentence of the same speaker
+    and language to the translator as context, unless the pause between the two lines is
+    mt_context.CONTEXT_MAX_PAUSE_S or more. True = every language, None = the default languages
+    (mt_context.CONTEXT_DEFAULT_LANGS, #1795), False = off.
     The context is never shown or saved as part of the line.
     mt_stream (#1771): stream each finished line's translation token by token; a sink with write_partial(Result)
     gets the text so far (shown in place of the pending line, never saved or spoken: write() still gets only the
@@ -385,7 +387,8 @@ def run(source: AudioSource, segmenter: Segmenter, asr: Recognizer,
         return held
 
     skipped = [0]  # #1369: lines left untranslated to catch up
-    line_ctx = LineContext() if mt_context else None  # #1750: previous finished line per speaker
+    line_ctx = (None if mt_context is False  # #1750: previous finished line per speaker
+                else LineContext(langs=None if mt_context else CONTEXT_DEFAULT_LANGS))
 
     def stale(item) -> bool:
         """#1369: this line is too old to be worth translating now, and newer lines wait behind it."""

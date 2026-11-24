@@ -1,5 +1,5 @@
 """#1750 --mt-context: the previous finished source line of the same speaker and language reaches the translator as
-context; off by default. Example sentences are made up (generic software talk)."""
+context; on by default for a Russian source (#1795), off for pipeline callers that pass nothing. Example sentences are made up (generic software talk)."""
 import numpy as np
 
 from tinglongwu.adapt import Ladder, SwitchableTranslator
@@ -185,4 +185,22 @@ def test_help_lists_mt_context(capsys):
         pass
     assert "--mt-context" in capsys.readouterr().out
     assert cli.parse_args(["--mt-context"]).mt_context is True
-    assert cli.parse_args([]).mt_context is False
+    assert cli.parse_args([]).mt_context is None  # #1795: default = on for ru only
+    assert cli.parse_args(["--no-mt-context"]).mt_context is False
+
+
+# ---- #1795: default on for a Russian source ----
+def test_default_languages_ru_only():
+    calls, _ = _run(LINES, mt_context=None)
+    assert [c[2] for c in calls] == [None, LINES[0][0]]
+    en = [("We created a new branch.", "en"), ("Delete the old branch.", "en")]
+    calls, _ = _run(en, mt_context=None)
+    assert [c[2] for c in calls] == [None, None]
+
+
+def test_true_forces_every_language_and_false_turns_off():
+    en = [("We created a new branch.", "en"), ("Delete the old branch.", "en")]
+    calls, _ = _run(en, mt_context=True)
+    assert [c[2] for c in calls] == [None, en[0][0]]
+    calls, _ = _run(LINES, mt_context=False)
+    assert [c[2] for c in calls] == [None, None]
